@@ -106,9 +106,19 @@ pub async fn send_message(engine: Eng<'_>, chat_id: String, body: MessageBody) -
 /// chat and size come in headers: `x-chat-id`, `x-width`, `x-height`, and `x-caption` (URL-encoded).
 #[tauri::command]
 pub async fn send_image(engine: Eng<'_>, request: Request<'_>) -> AppResult<UiMessage> {
-    let InvokeBody::Raw(bytes) = request.body() else {
-        return Err(AppError::Invalid("No picture came through.".into()));
+    // Desktop sends the bytes as they are. Android's WebView can't hand a request body over, so Tauri sends them
+    // through postMessage as JSON instead: an array of numbers.
+    let json_bytes;
+    let bytes: &[u8] = match request.body() {
+        InvokeBody::Raw(bytes) => bytes,
+        InvokeBody::Json(value) => {
+            json_bytes = picture_from_json(value).ok_or_else(|| AppError::Invalid("No picture came through.".into()))?;
+            &json_bytes
+        }
     };
+    if bytes.is_empty() {
+        return Err(AppError::Invalid("No picture came through.".into()));
+    }
     if bytes.len() > kit_protocol::MAX_MEDIA_BYTES {
         return Err(AppError::Invalid("That picture is too big.".into()));
     }
@@ -121,6 +131,22 @@ pub async fn send_image(engine: Eng<'_>, request: Request<'_>) -> AppResult<UiMe
     tokio::fs::write(engine.media_dir.join(&local), bytes).await?;
     let body = MessageBody::Image { media_id: local.clone(), width, height, caption };
     queue(&engine, chat_id, body, Some(local)).await
+}
+
+/// Picture bytes sent as JSON: an array of numbers, or an object of index to number (a typed array serialized as is).
+fn picture_from_json(value: &serde_json::Value) -> Option<Vec<u8>> {
+    let byte = |v: &serde_json::Value| v.as_u64().and_then(|n| u8::try_from(n).ok());
+    match value {
+        serde_json::Value::Array(items) => items.iter().map(byte).collect(),
+        serde_json::Value::Object(map) => {
+            let mut bytes = vec![0u8; map.len()];
+            for (key, v) in map {
+                *bytes.get_mut(key.parse::<usize>().ok()?)? = byte(v)?;
+            }
+            Some(bytes)
+        }
+        _ => None,
+    }
 }
 
 #[tauri::command]
@@ -362,6 +388,15 @@ fn percent_decode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn picture_bytes_from_json() {
+        assert_eq!(picture_from_json(&serde_json::json!([255, 216, 0])), Some(vec![255, 216, 0]));
+        assert_eq!(picture_from_json(&serde_json::json!({"1": 216, "0": 255})), Some(vec![255, 216]));
+        assert_eq!(picture_from_json(&serde_json::json!([256])), None);
+        assert_eq!(picture_from_json(&serde_json::json!({"5": 1})), None);
+        assert_eq!(picture_from_json(&serde_json::json!("abc")), None);
+    }
 
     #[test]
     fn percent_round_trip() {
