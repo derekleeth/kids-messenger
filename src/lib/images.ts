@@ -16,10 +16,33 @@ export function fitWithin(width: number, height: number, max = MAX_SIDE): { widt
   return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
 }
 
-export async function prepareImage(blob: Blob): Promise<Prepared> {
+type Decoded = { source: CanvasImageSource; width: number; height: number; close: () => void };
+
+/** The picture as something a canvas can draw, the right way up. */
+async function decode(blob: Blob): Promise<Decoded> {
   // `from-image` applies the photo's rotation before it's dropped with the rest of the EXIF data.
-  const bitmap = await createImageBitmap(blob, { imageOrientation: "from-image" });
-  const { width, height } = fitWithin(bitmap.width, bitmap.height);
+  try {
+    const bitmap = await createImageBitmap(blob, { imageOrientation: "from-image" });
+    return { source: bitmap, width: bitmap.width, height: bitmap.height, close: () => bitmap.close() };
+  } catch {
+    // Android's WebView can't decode some camera photos this way (Pixel "Ultra HDR" JPEGs, with a gain map), though
+    // an <img> shows them fine. An <img> also applies the photo's rotation.
+  }
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+    return { source: img, width: img.naturalWidth, height: img.naturalHeight, close: () => URL.revokeObjectURL(url) };
+  } catch {
+    URL.revokeObjectURL(url);
+    throw new Error("That picture can't be opened. Try a screenshot of it, or a different picture.");
+  }
+}
+
+export async function prepareImage(blob: Blob): Promise<Prepared> {
+  const picture = await decode(blob);
+  const { width, height } = fitWithin(picture.width, picture.height);
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
@@ -28,8 +51,8 @@ export async function prepareImage(blob: Blob): Promise<Prepared> {
   // Pictures with see-through parts get a white background instead of black.
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, width, height);
-  ctx.drawImage(bitmap, 0, 0, width, height);
-  bitmap.close();
+  ctx.drawImage(picture.source, 0, 0, width, height);
+  picture.close();
   const out = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", QUALITY));
   if (!out) throw new Error("Couldn't get the picture ready.");
   return { bytes: new Uint8Array(await out.arrayBuffer()), width, height };
