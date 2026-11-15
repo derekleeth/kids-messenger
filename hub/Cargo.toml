@@ -1,0 +1,33 @@
+[package]
+name = "kitchat-hub"
+description = "The KitChat family hub: keeps the family's messages, pictures and notes, and passes them to every device"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "kitchat-hub"
+path = "src/main.rs"
+
+[dependencies]
+kit-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ulid.workspace = true
+log.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+sqlx.workspace = true
+axum = { version = "0.8", features = ["ws"] }
+env_logger = "0.11"
+sha2 = "0.10"
+getrandom = "0.3"
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "charset", "gzip"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+url = "2"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

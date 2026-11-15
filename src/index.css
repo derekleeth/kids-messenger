@@ -1,0 +1,254 @@
+@import "@fontsource-variable/nunito/wght.css";
+@import "tailwindcss";
+
+/* KitChat's colours. Light ("daytime") is the default; "bedtime" is a calm dark theme. Each member and note colour has
+   a strong shade (buttons, dots) and a soft one (backgrounds). */
+:root {
+  --bg: #fff8ec;
+  --bg-2: #fff0d9;
+  --surface: #ffffff;
+  --surface-2: #fff7ea;
+  --ink: #2b1d4f;
+  --ink-soft: #6f6290;
+  --line: #f0dfc4;
+  --brand: #7c5cff;
+  --brand-soft: #ece6ff;
+  --brand-ink: #ffffff;
+  --mine: #7c5cff;
+  --mine-ink: #ffffff;
+  --theirs: #ffffff;
+  --danger: #e8466b;
+  --ok: #22b07d;
+  --shadow: 0 2px 0 rgba(43, 29, 79, 0.08), 0 8px 24px rgba(43, 29, 79, 0.08);
+
+  --sun: #ffc233;
+  --sun-soft: #fff3c4;
+  --sky: #3fa9f5;
+  --sky-soft: #d9efff;
+  --bubblegum: #f76ba5;
+  --bubblegum-soft: #ffe0ee;
+  --mint: #2fc99a;
+  --mint-soft: #d2f7ea;
+  --grape: #8b6cf7;
+  --grape-soft: #e9e2ff;
+  --tangerine: #ff8a3d;
+  --tangerine-soft: #ffe6d3;
+
+  color-scheme: light;
+}
+
+:root[data-theme="bedtime"] {
+  --bg: #17112e;
+  --bg-2: #1e1740;
+  --surface: #251c4b;
+  --surface-2: #2d2358;
+  --ink: #f4efff;
+  --ink-soft: #b7abd9;
+  --line: #3a2f6a;
+  --brand: #9d86ff;
+  --brand-soft: #352a68;
+  --brand-ink: #160f2e;
+  --mine: #8b6cf7;
+  --mine-ink: #ffffff;
+  --theirs: #2d2358;
+  --shadow: 0 2px 0 rgba(0, 0, 0, 0.25), 0 8px 24px rgba(0, 0, 0, 0.3);
+
+  --sun-soft: #4a3d17;
+  --sky-soft: #173a57;
+  --bubblegum-soft: #4d1f37;
+  --mint-soft: #154536;
+  --grape-soft: #362b66;
+  --tangerine-soft: #4d2a14;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --font-sans: "Nunito Variable", ui-rounded, system-ui, sans-serif;
+  --color-bg: var(--bg);
+  --color-bg-2: var(--bg-2);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-line: var(--line);
+  --color-brand: var(--brand);
+  --color-brand-soft: var(--brand-soft);
+  --color-brand-ink: var(--brand-ink);
+  --color-danger: var(--danger);
+  --color-ok: var(--ok);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 17px;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+}
+
+/* Plain-element rules sit in Tailwind's base layer, so utility classes can override them. */
+@layer base {
+  button {
+    cursor: pointer;
+    font: inherit;
+    color: inherit;
+  }
+  button:disabled {
+    cursor: default;
+  }
+  input,
+  textarea {
+    font: inherit;
+    color: inherit;
+  }
+  :focus-visible {
+    outline: 3px solid var(--brand);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  .card {
+    background: var(--surface);
+    border-radius: 22px;
+    box-shadow: var(--shadow);
+  }
+
+  /* A colour by name: `tint-sky` sets --tint and --tint-soft for what's inside. */
+  .tint-sun {
+    --tint: var(--sun);
+    --tint-soft: var(--sun-soft);
+  }
+  .tint-sky {
+    --tint: var(--sky);
+    --tint-soft: var(--sky-soft);
+  }
+  .tint-bubblegum {
+    --tint: var(--bubblegum);
+    --tint-soft: var(--bubblegum-soft);
+  }
+  .tint-mint {
+    --tint: var(--mint);
+    --tint-soft: var(--mint-soft);
+  }
+  .tint-grape {
+    --tint: var(--grape);
+    --tint-soft: var(--grape-soft);
+  }
+  .tint-tangerine {
+    --tint: var(--tangerine);
+    --tint-soft: var(--tangerine-soft);
+  }
+
+  .scroll-area {
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line) transparent;
+  }
+
+  /* Android draws the app edge to edge: keep content clear of the status and gesture bars. A transparent border
+     (not padding), so it adds to padding classes like py-2 instead of replacing them; !important so a border colour
+     class on the same element can't paint it. */
+  .safe-top {
+    border-top: env(safe-area-inset-top) solid transparent !important;
+  }
+  .safe-bottom {
+    border-bottom: env(safe-area-inset-bottom) solid transparent !important;
+  }
+}
+
+/* Kit's little moves. */
+@keyframes kit-hop {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  40% {
+    transform: translateY(-10px) rotate(-3deg);
+  }
+  70% {
+    transform: translateY(0) rotate(2deg);
+  }
+}
+@keyframes kit-sway {
+  0%,
+  100% {
+    transform: rotate(-2deg);
+  }
+  50% {
+    transform: rotate(2deg);
+  }
+}
+@keyframes kit-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.03);
+  }
+}
+@keyframes pop-in {
+  from {
+    transform: scale(0.85);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+@keyframes rise {
+  from {
+    transform: translateY(12px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+@keyframes confetti-fall {
+  0% {
+    transform: translateY(-20px) rotate(0);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(260px) rotate(540deg);
+    opacity: 0;
+  }
+}
+.anim-hop {
+  animation: kit-hop 0.7s ease-out;
+}
+.anim-sway {
+  animation: kit-sway 3s ease-in-out infinite;
+  transform-origin: 50% 90%;
+}
+.anim-breathe {
+  animation: kit-breathe 3.5s ease-in-out infinite;
+}
+.anim-pop {
+  animation: pop-in 0.22s cubic-bezier(0.2, 1.4, 0.4, 1);
+}
+.anim-rise {
+  animation: rise 0.25s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .anim-hop,
+  .anim-sway,
+  .anim-breathe,
+  .anim-pop,
+  .anim-rise {
+    animation: none;
+  }
+}

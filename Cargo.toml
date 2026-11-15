@@ -1,0 +1,27 @@
+# One workspace for the app's Rust side, the family hub and the protocol they share.
+[workspace]
+resolver = "3"
+members = ["src-tauri", "hub", "crates/kit-protocol"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Derek Leeth"]
+publish = false
+
+[workspace.dependencies]
+kit-protocol = { path = "crates/kit-protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+ulid = "1"
+log = "0.4"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "migrate", "macros"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
