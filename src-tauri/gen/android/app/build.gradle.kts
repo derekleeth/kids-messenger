@@ -57,7 +57,9 @@ android {
             }
         }
         getByName("release") {
-            signingConfigs.findByName("release")?.let { signingConfig = it }
+            // Without keystore.properties, this PC's Android debug key (~/.android/debug.keystore) signs it, so it
+            // still installs; updates then have to be built on this same PC.
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
             optimization {
                enable = true
             }
