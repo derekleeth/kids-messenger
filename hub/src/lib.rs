@@ -8,7 +8,6 @@
 pub mod auth;
 pub mod db;
 pub mod error;
-pub mod images;
 pub mod live;
 pub mod preview;
 pub mod random;
@@ -38,6 +37,10 @@ impl Hub {
     pub fn media_dir(&self) -> PathBuf {
         self.data_dir.join("media")
     }
+
+    pub fn uploads_dir(&self) -> PathBuf {
+        self.data_dir.join("uploads")
+    }
 }
 
 pub struct Options {
@@ -48,6 +51,7 @@ pub struct Options {
 /// Opens (or creates) the hub's database in `data_dir` and gets it ready to serve.
 pub async fn open(options: Options) -> Result<Arc<Hub>, error::ApiError> {
     std::fs::create_dir_all(options.data_dir.join("media"))?;
+    std::fs::create_dir_all(options.data_dir.join("uploads"))?;
     let pool = db::open(&options.data_dir.join("kitchat-hub.db")).await?;
     let (live, _) = broadcast::channel(512);
     let setup_code = if db::family_name(&pool).await?.is_none() { Some(random::setup_code()) } else { None };
@@ -79,6 +83,7 @@ pub fn setup_code_file(data_dir: &Path) -> PathBuf {
 /// A hub with an in-memory database and no link previews, for tests.
 pub async fn open_in_memory(data_dir: PathBuf) -> Result<Arc<Hub>, error::ApiError> {
     std::fs::create_dir_all(data_dir.join("media"))?;
+    std::fs::create_dir_all(data_dir.join("uploads"))?;
     let pool = db::open_memory().await?;
     let (live, _) = broadcast::channel(512);
     Ok(Arc::new(Hub {

@@ -6,11 +6,13 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { api } from "../lib/api";
 import { useBack } from "../lib/back";
 import { dayLabel, sameDay } from "../lib/format";
-import { imageFiles } from "../lib/images";
+import { mediaFiles } from "../lib/images";
+import { type Attachment, fromBlobs } from "../lib/outgoing";
 import { memberById, mergeMessages, otherMember, setState, useAppState } from "../lib/state";
 import type { Message } from "../lib/types";
-import { Composer, toAttachments, type Attachment } from "./Composer";
+import { Composer } from "./Composer";
 import { Kit } from "./Kit";
+import { MediaViewer, type Viewing } from "./MediaViewer";
 import { MessageBubble } from "./MessageBubble";
 import { Avatar, IconButton, StatusPill } from "./ui";
 
@@ -26,7 +28,7 @@ export function ChatView({
   chatId: string;
   onBack: (() => void) | null;
   onOpenNote: (noteId: string) => void;
-  pendingShare?: Blob[];
+  pendingShare?: Attachment[];
   clearPendingShare?: () => void;
 }) {
   const chat = useAppState((s) => s.chats.find((c) => c.id === chatId));
@@ -34,7 +36,7 @@ export function ChatView({
   const members = useAppState((s) => s.members);
   const me = useAppState((s) => s.account?.me.id ?? "");
   const status = useAppState((s) => s.status);
-  const [viewer, setViewer] = useState<string | null>(null);
+  const [viewer, setViewer] = useState<Viewing | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [dragging, setDragging] = useState(false);
   const [hop, setHop] = useState(0);
@@ -49,7 +51,7 @@ export function ChatView({
   // Pictures shared in from another app, waiting to be sent here.
   useEffect(() => {
     if (pendingShare && pendingShare.length) {
-      setAttachments((a) => [...a, ...toAttachments(pendingShare)]);
+      setAttachments((a) => [...a, ...pendingShare]);
       clearPendingShare?.();
     }
   }, [pendingShare, clearPendingShare]);
@@ -129,8 +131,8 @@ export function ChatView({
       onDrop={(e) => {
         e.preventDefault();
         setDragging(false);
-        const files = imageFiles(e.dataTransfer.files);
-        if (files.length) setAttachments((a) => [...a, ...toAttachments(files)]);
+        const files = mediaFiles(e.dataTransfer.files);
+        if (files.length) setAttachments((a) => [...a, ...fromBlobs(files)]);
       }}
     >
       <header className="safe-top flex items-center gap-2 border-b-2 border-line bg-surface px-2 py-2">
@@ -224,16 +226,12 @@ export function ChatView({
         <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center bg-[rgba(124,92,255,0.18)]">
           <div className="card flex flex-col items-center p-6">
             <Kit mood="camera" size={110} />
-            <p className="text-xl font-black">Drop pictures to send</p>
+            <p className="text-xl font-black">Drop photos or videos to send</p>
           </div>
         </div>
       )}
 
-      {viewer && (
-        <div className="fixed inset-0 z-50 grid place-items-center bg-black/90 p-4" onClick={() => setViewer(null)}>
-          <img src={viewer} alt="" className="max-h-full max-w-full rounded-xl object-contain" />
-        </div>
-      )}
+      {viewer && <MediaViewer viewing={viewer} onClose={() => setViewer(null)} />}
     </div>
   );
 }

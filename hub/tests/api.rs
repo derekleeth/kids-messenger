@@ -303,6 +303,71 @@ async fn pictures_lose_their_location_and_need_a_token() {
 }
 
 #[tokio::test]
+async fn big_uploads_come_in_chunks_and_videos_lose_their_location() {
+    let f = family().await;
+    // A tiny MP4: ftyp, the frames, and an index holding a location box.
+    let mut video = Vec::new();
+    for (kind, body) in [(&b"ftyp"[..], &b"isom    "[..]), (b"mdat", b"0123456789frames")] {
+        video.extend(((body.len() + 8) as u32).to_be_bytes());
+        video.extend(kind);
+        video.extend(body);
+    }
+    let xyz = [&[0, 0, 0, 21][..], b"\xA9xyz", b"+40.71-074.00"].concat();
+    let udta = [&((xyz.len() + 8) as u32).to_be_bytes()[..], b"udta", &xyz].concat();
+    video.extend([&((udta.len() + 8) as u32).to_be_bytes()[..], b"moov", &udta].concat());
+
+    let (status, state) = call(&f.app, "POST", "/media/uploads", Some(&f.kid), Some(json!({ "size": video.len() }))).await;
+    assert_eq!(status, StatusCode::OK);
+    let id = state["uploadId"].as_str().unwrap().to_string();
+    let path = format!("/media/uploads/{id}");
+    // Someone else can't see or add to it.
+    assert_eq!(call(&f.app, "GET", &path, Some(&f.parent), None).await.0, StatusCode::NOT_FOUND);
+
+    let (first, rest) = video.split_at(20);
+    assert_eq!(raw(&f.app, "PUT", &format!("{path}?offset=0"), Some(&f.kid), first.to_vec()).await.0, StatusCode::OK);
+    // Finishing early, or a chunk at the wrong place, is refused; the state says where to carry on.
+    assert_eq!(call(&f.app, "POST", &format!("{path}/finish"), Some(&f.kid), None).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(raw(&f.app, "PUT", &format!("{path}?offset=5"), Some(&f.kid), rest.to_vec()).await.0, StatusCode::CONFLICT);
+    assert_eq!(call(&f.app, "GET", &path, Some(&f.kid), None).await.1["received"], 20);
+    assert_eq!(raw(&f.app, "PUT", &format!("{path}?offset=20"), Some(&f.kid), rest.to_vec()).await.0, StatusCode::OK);
+    let (status, done) = call(&f.app, "POST", &format!("{path}/finish"), Some(&f.kid), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let media_id = done["mediaId"].as_str().unwrap().to_string();
+
+    let (status, bytes) = raw(&f.app, "GET", &format!("/media/{media_id}"), Some(&f.parent), vec![]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes.len(), video.len());
+    assert!(!bytes.windows(4).any(|w| w == b"\xA9xyz"));
+
+    // A part of it, as a video player asks.
+    let req = Request::builder()
+        .uri(format!("/media/{media_id}"))
+        .header(header::AUTHORIZATION, format!("Bearer {}", f.parent))
+        .header(header::RANGE, "bytes=24-29")
+        .body(Body::empty())
+        .unwrap();
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(res.headers()[header::CONTENT_TYPE], "video/mp4");
+    assert_eq!(&res.into_body().collect().await.unwrap().to_bytes()[..], b"012345");
+
+    let chat = sync(&f.app, &f.kid, 0).await.chats[0].id.clone();
+    let body = json!({ "kind": "video", "videoMediaId": media_id, "width": 1080, "height": 1920, "durationMs": 1500, "bytes": video.len() });
+    let (status, msg) = call(&f.app, "POST", &format!("/chats/{chat}/messages"), Some(&f.kid), Some(json!({ "id": ulid(), "body": body }))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(msg["body"]["kind"], "video");
+
+    // Only photos and videos.
+    let (_, state) = call(&f.app, "POST", "/media/uploads", Some(&f.kid), Some(json!({ "size": 6 }))).await;
+    let path = format!("/media/uploads/{}", state["uploadId"].as_str().unwrap());
+    raw(&f.app, "PUT", &format!("{path}?offset=0"), Some(&f.kid), b"<html>".to_vec()).await;
+    assert_eq!(call(&f.app, "POST", &format!("{path}/finish"), Some(&f.kid), None).await.0, StatusCode::BAD_REQUEST);
+    // Too big to start.
+    let huge = json!({ "size": kit_protocol::MAX_ORIGINAL_BYTES + 1 });
+    assert_eq!(call(&f.app, "POST", "/media/uploads", Some(&f.kid), Some(huge)).await.0, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn a_removed_device_is_shut_out() {
     let f = family().await;
     let (_, devices) = call(&f.app, "GET", "/devices", Some(&f.parent), None).await;

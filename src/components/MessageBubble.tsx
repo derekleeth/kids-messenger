@@ -1,14 +1,15 @@
-// One message: text with links, a picture, a Kit sticker or a shared list, with its link preview and reactions.
+// One message: text with links, a photo or video, a Kit sticker or a shared list, with its link preview and reactions.
 
-import { AlertCircle, Clock, ExternalLink, RotateCcw, SmilePlus, Trash2 } from "lucide-react";
+import { AlertCircle, Clock, ExternalLink, Film, Play, RotateCcw, SmilePlus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { api, errorText, openLink } from "../lib/api";
 import { timeOf } from "../lib/format";
 import { isBigEmoji, site, splitLinks } from "../lib/links";
-import { useMedia } from "../lib/media";
+import { durationText, percent, useMedia, useUpload } from "../lib/media";
 import { dropMessage, memberById, setState, useAppState } from "../lib/state";
 import type { LinkPreview, Message } from "../lib/types";
 import { Kit, STICKER_MOOD } from "./Kit";
+import type { Viewing } from "./MediaViewer";
 import { Avatar, toast } from "./ui";
 
 export const QUICK_REACTIONS = ["❤️", "😂", "😮", "👍", "🎉", "😢"];
@@ -49,7 +50,7 @@ export function MediaImage({
   width: number;
   height: number;
   className?: string;
-  onOpen?: (url: string) => void;
+  onOpen?: () => void;
 }) {
   const { url, failed } = useMedia(id);
   const ratio = width > 0 && height > 0 ? `${width} / ${height}` : "4 / 3";
@@ -60,7 +61,7 @@ export function MediaImage({
       onClick={(e) => {
         if (url && onOpen) {
           e.stopPropagation();
-          onOpen(url);
+          onOpen();
         }
       }}
     >
@@ -72,6 +73,51 @@ export function MediaImage({
         </div>
       )}
     </div>
+  );
+}
+
+/** A video in the chat: its still (or a plain card), with a play button and its length. */
+function VideoCard({
+  posterId,
+  width,
+  height,
+  durationMs,
+  onOpen,
+}: {
+  posterId?: string | null;
+  width: number;
+  height: number;
+  durationMs: number;
+  onOpen: () => void;
+}) {
+  const { url } = useMedia(posterId);
+  const ratio = width > 0 && height > 0 ? `${width} / ${height}` : "16 / 9";
+  return (
+    <button
+      className="relative block w-full overflow-hidden rounded-2xl bg-ink/80"
+      style={{ aspectRatio: ratio, maxHeight: 360, minWidth: 160 }}
+      onClick={(e) => {
+        e.stopPropagation();
+        onOpen();
+      }}
+      aria-label="Play video"
+    >
+      {url ? (
+        <img src={url} alt="" className="h-full w-full object-cover" draggable={false} />
+      ) : (
+        <div className="grid h-full w-full place-items-center text-white/70">
+          <Film size={40} />
+        </div>
+      )}
+      <span className="absolute inset-0 grid place-items-center">
+        <span className="grid size-14 place-items-center rounded-full bg-black/55 text-white">
+          <Play size={28} />
+        </span>
+      </span>
+      <span className="absolute bottom-2 left-2 rounded-full bg-black/60 px-2 text-sm font-bold text-white">
+        {durationText(durationMs)}
+      </span>
+    </button>
   );
 }
 
@@ -106,7 +152,7 @@ export function MessageBubble({
 }: {
   message: Message;
   showSender: boolean;
-  onOpenImage: (url: string) => void;
+  onOpenImage: (viewing: Viewing) => void;
   onOpenNote: (noteId: string) => void;
 }) {
   const me = useAppState((s) => s.account?.me.id ?? "");
@@ -117,6 +163,7 @@ export function MessageBubble({
   const sender = memberById(members, message.senderId);
   const body = message.body;
   const myReaction = message.reactions.find((r) => r.memberId === me)?.emoji;
+  const uploaded = percent(useUpload(message.pending ? message.id : null));
 
   const react = async (emoji: string) => {
     setPicking(false);
@@ -148,7 +195,45 @@ export function MessageBubble({
     case "image":
       content = (
         <div className="-m-1">
-          <MediaImage id={body.mediaId} width={body.width} height={body.height} onOpen={onOpenImage} />
+          <MediaImage
+            id={body.mediaId}
+            width={body.width}
+            height={body.height}
+            onOpen={() =>
+              onOpenImage({
+                kind: "image",
+                mediaId: body.mediaId,
+                fullMediaId: body.fullMediaId,
+                fullBytes: body.fullBytes,
+              })
+            }
+          />
+          {body.caption && (
+            <div className="px-2 pt-2 pb-1">
+              <Linkified text={body.caption} />
+            </div>
+          )}
+        </div>
+      );
+      break;
+    case "video":
+      content = (
+        <div className="-m-1 w-64 max-w-full">
+          <VideoCard
+            posterId={body.posterMediaId}
+            width={body.width}
+            height={body.height}
+            durationMs={body.durationMs}
+            onOpen={() =>
+              onOpenImage({
+                kind: "video",
+                videoMediaId: body.videoMediaId,
+                posterMediaId: body.posterMediaId,
+                bytes: body.bytes,
+                durationMs: body.durationMs,
+              })
+            }
+          />
           {body.caption && (
             <div className="px-2 pt-2 pb-1">
               <Linkified text={body.caption} />
@@ -286,7 +371,7 @@ export function MessageBubble({
             </>
           ) : message.pending ? (
             <>
-              <Clock size={12} /> Sending…
+              <Clock size={12} /> {uploaded !== null && uploaded < 100 ? `Sending… ${uploaded}%` : "Sending…"}
             </>
           ) : (
             <span className="opacity-0 transition group-hover:opacity-100">{timeOf(message.createdAt)}</span>

@@ -133,6 +133,8 @@ export function summary(m: Message): string {
       return m.body.text;
     case "image":
       return m.body.caption ? `📷 ${m.body.caption}` : "📷 Picture";
+    case "video":
+      return m.body.caption ? `🎬 ${m.body.caption}` : "🎬 Video";
     case "sticker":
       return "Sticker";
     case "note":

@@ -10,12 +10,15 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import android.webkit.MimeTypeMap
 import android.webkit.WebView
+import androidx.activity.result.ActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import app.tauri.PermissionState
+import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.Permission
@@ -33,14 +36,12 @@ import com.google.mlkit.common.MlKitException
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
-import java.io.File
-import java.util.UUID
 
 private const val NOTIFICATIONS = "notifications"
 private const val LOCAL_NETWORK = "localNetwork"
 private const val MESSAGES_CHANNEL = "messages"
 private const val TAG = "KitPlugin"
-private const val MAX_SHARED_BYTES = 30L * 1024 * 1024
+private const val MAX_PICKED = 20
 
 @InvokeArg
 class NotifyArgs {
@@ -58,8 +59,10 @@ class KeepAliveArgs {
  * - `notify`: a new-message notification.
  * - `keepAlive`: runs [HubService] while this device is in a family, so messages keep arriving in the background.
  *   Also asks once for the notification and (Android 17+) local network permissions.
- * - `takeShared`: pictures and text shared in from other apps. Pictures are copied to `cache/shared/` (the Rust side
- *   reads them from `app_cache_dir()/shared` and deletes them).
+ * - `takeShared`: photos, videos and text shared in from other apps.
+ * - `pickMedia`: photos and videos from Android's photo picker (no storage permission needed).
+ *   Both copy each file into `cache/outgoing/` with a small preview ([Outgoing]); the Rust side's `send_media` takes
+ *   them from there.
  * - `localNetwork`: Android 17's permission to reach the home network, asked before joining a hub there.
  * - `scan`: a join QR code, through Google's code scanner (no camera permission needed).
  */
@@ -118,6 +121,7 @@ class KitPlugin(private val activity: Activity) : Plugin(activity) {
     page = webView
     instance = this
     createChannel()
+    Thread { Outgoing.clearOld(activity) }.start()
   }
 
   /** Tells the page something new was shared while it was already open (src/components/ShareSheet.tsx). */
@@ -209,37 +213,16 @@ class KitPlugin(private val activity: Activity) : Plugin(activity) {
       pendingUris.clear()
       pendingTexts.clear()
     }
-    // Copying a few pictures can take a moment; not on the main thread.
+    // Copying photos and videos can take a moment; not on the main thread.
     Thread {
       val items = JSArray()
-      val dir = File(activity.cacheDir, "shared").apply { mkdirs() }
+      var problem: String? = null
       for ((uri, intentType) in uris) {
         try {
-          val mime = activity.contentResolver.getType(uri) ?: intentType
-          if (!mime.startsWith("image/")) continue
-          val ext = MimeTypeMap.getSingleton().getExtensionFromMimeType(mime) ?: "img"
-          val file = File(dir, "${UUID.randomUUID()}.$ext")
-          var copied = 0L
-          activity.contentResolver.openInputStream(uri)?.use { input ->
-            file.outputStream().use { output ->
-              val buf = ByteArray(64 * 1024)
-              while (true) {
-                val n = input.read(buf)
-                if (n < 0) break
-                copied += n
-                if (copied > MAX_SHARED_BYTES) throw IllegalStateException("picture too big")
-                output.write(buf, 0, n)
-              }
-            }
-          }
-          val item = JSObject()
-          item.put("kind", "image")
-          item.put("path", file.absolutePath)
-          item.put("mime", mime)
-          item.put("name", uri.lastPathSegment ?: "")
-          items.put(item)
+          Outgoing.prepare(activity, uri, intentType)?.let { items.put(it) }
         } catch (e: Exception) {
-          Log.w(TAG, "shared picture: ${e.message}")
+          Log.w(TAG, "shared file: ${e.message}")
+          problem = e.message
         }
       }
       for (text in texts) {
@@ -250,7 +233,41 @@ class KitPlugin(private val activity: Activity) : Plugin(activity) {
       }
       val result = JSObject()
       result.put("items", items)
+      if (problem != null) result.put("problem", problem)
       invoke.resolve(result)
+    }.start()
+  }
+
+  private val picker = ActivityResultContracts.PickMultipleVisualMedia(MAX_PICKED)
+
+  /** `{ items: [...] }` as in [takeShared]; empty when the person backs out. */
+  @Command
+  fun pickMedia(invoke: Invoke) {
+    val request = PickVisualMediaRequest.Builder()
+      .setMediaType(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+      .build()
+    startActivityForResult(invoke, picker.createIntent(activity, request), "picked")
+  }
+
+  @ActivityCallback
+  private fun picked(invoke: Invoke, result: ActivityResult) {
+    val uris = picker.parseResult(result.resultCode, result.data)
+    Thread {
+      val items = JSArray()
+      var problem: String? = null
+      for (uri in uris) {
+        try {
+          Outgoing.prepare(activity, uri, null)?.let { items.put(it) }
+        } catch (e: Exception) {
+          Log.w(TAG, "picked file: ${e.message}")
+          problem = e.message
+        }
+      }
+      if (items.length() == 0 && problem != null) {
+        invoke.reject(problem)
+        return@Thread
+      }
+      invoke.resolve(JSObject().put("items", items))
     }.start()
   }
 

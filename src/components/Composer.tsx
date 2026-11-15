@@ -1,9 +1,11 @@
-// Writing a message: text, emoji, Kit stickers and pictures (picked, pasted or dropped).
+// Writing a message: text, emoji, Kit stickers, and photos and videos (picked, pasted or dropped), sent at full size.
 
-import { ImagePlus, SendHorizontal, Smile, X } from "lucide-react";
+import { Film, ImagePlus, SendHorizontal, Smile, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { api, errorText } from "../lib/api";
-import { imageFiles, prepareImage } from "../lib/images";
+import { api, errorText, isAndroid } from "../lib/api";
+import { mediaFiles } from "../lib/images";
+import { durationText } from "../lib/media";
+import { type Attachment, fromBlobs, fromItems, release, toOutgoing } from "../lib/outgoing";
 import { STICKERS } from "../lib/types";
 import { Kit, STICKER_MOOD } from "./Kit";
 import { IconButton, toast } from "./ui";
@@ -35,18 +37,6 @@ const EMOJI = [
   "💡",
 ];
 
-export interface Attachment {
-  id: number;
-  file: Blob;
-  url: string;
-}
-
-let nextAttachment = 1;
-
-export function toAttachments(files: Blob[]): Attachment[] {
-  return files.map((file) => ({ id: nextAttachment++, file, url: URL.createObjectURL(file) }));
-}
-
 export function Composer({
   chatId,
   attachments,
@@ -61,6 +51,7 @@ export function Composer({
   const [text, setText] = useState("");
   const [panel, setPanel] = useState(false);
   const [sending, setSending] = useState(false);
+  const [preparing, setPreparing] = useState(false);
   const box = useRef<HTMLTextAreaElement>(null);
   const picker = useRef<HTMLInputElement>(null);
 
@@ -79,10 +70,11 @@ export function Composer({
     if (!trimmed && attachments.length === 0) return;
     setSending(true);
     try {
-      for (const [i, a] of attachments.entries()) {
-        const prepared = await prepareImage(a.file);
-        await api.sendImage(chatId, prepared.bytes, prepared.width, prepared.height, i === 0 ? trimmed : "");
-        URL.revokeObjectURL(a.url);
+      if (attachments.length) {
+        const items = [];
+        for (const [i, a] of attachments.entries()) items.push(await toOutgoing(a, i === 0 ? trimmed : ""));
+        await api.sendMedia(chatId, items);
+        attachments.forEach(release);
       }
       if (trimmed && attachments.length === 0) await api.sendMessage(chatId, { kind: "text", text: trimmed });
       setText("");
@@ -94,6 +86,23 @@ export function Composer({
     } finally {
       setSending(false);
       box.current?.focus();
+    }
+  };
+
+  const pick = async () => {
+    if (!isAndroid) {
+      picker.current?.click();
+      return;
+    }
+    setPreparing(true);
+    try {
+      const items = await api.pickMedia();
+      if (items === null) picker.current?.click();
+      else if (items.length) setAttachments((a) => [...a, ...fromItems(items)]);
+    } catch (e) {
+      toast(errorText(e), "error");
+    } finally {
+      setPreparing(false);
     }
   };
 
@@ -113,12 +122,26 @@ export function Composer({
         <div className="flex gap-2 overflow-x-auto px-3 pt-3">
           {attachments.map((a) => (
             <div key={a.id} className="anim-pop relative shrink-0">
-              <img src={a.url} alt="" className="size-24 rounded-2xl object-cover" />
+              {a.kind === "video" && a.blob ? (
+                <video src={a.url} muted playsInline preload="metadata" className="size-24 rounded-2xl object-cover" />
+              ) : a.url ? (
+                <img src={a.url} alt="" className="size-24 rounded-2xl object-cover" />
+              ) : (
+                <div className="grid size-24 place-items-center rounded-2xl bg-surface-2 text-ink-soft">
+                  <Film />
+                </div>
+              )}
+              {a.kind === "video" && (
+                <span className="absolute bottom-1 left-1 flex items-center gap-1 rounded-full bg-black/60 px-1.5 text-xs font-bold text-white">
+                  <Film size={12} />
+                  {a.ready?.durationMs ? durationText(a.ready.durationMs) : "Video"}
+                </span>
+              )}
               <button
                 className="absolute -top-2 -right-2 grid size-8 place-items-center rounded-full bg-ink text-bg"
-                aria-label="Remove picture"
+                aria-label="Remove"
                 onClick={() => {
-                  URL.revokeObjectURL(a.url);
+                  release(a);
                   setAttachments((list) => list.filter((x) => x.id !== a.id));
                 }}
               >
@@ -166,18 +189,22 @@ export function Composer({
         >
           <Smile />
         </IconButton>
-        <IconButton label="Send a picture" onClick={() => picker.current?.click()}>
+        <IconButton
+          label="Send photos or videos"
+          onClick={() => void pick()}
+          className={preparing ? "animate-pulse" : ""}
+        >
           <ImagePlus />
         </IconButton>
         <input
           ref={picker}
           type="file"
-          accept="image/*"
+          accept="image/*,video/*"
           multiple
           hidden
           onChange={(e) => {
-            const files = imageFiles(e.target.files);
-            if (files.length) setAttachments((a) => [...a, ...toAttachments(files)]);
+            const files = mediaFiles(e.target.files);
+            if (files.length) setAttachments((a) => [...a, ...fromBlobs(files)]);
             e.target.value = "";
           }}
         />
@@ -193,10 +220,10 @@ export function Composer({
             }
           }}
           onPaste={(e) => {
-            const files = imageFiles(e.clipboardData?.items);
+            const files = mediaFiles(e.clipboardData?.items);
             if (files.length) {
               e.preventDefault();
-              setAttachments((a) => [...a, ...toAttachments(files)]);
+              setAttachments((a) => [...a, ...fromBlobs(files)]);
             }
           }}
           placeholder={attachments.length ? "Add a caption…" : "Message"}
@@ -205,7 +232,7 @@ export function Composer({
         <button
           type="button"
           aria-label="Send"
-          disabled={sending || (!text.trim() && attachments.length === 0)}
+          disabled={sending || preparing || (!text.trim() && attachments.length === 0)}
           onClick={() => void send()}
           className="grid size-12 shrink-0 place-items-center rounded-full bg-brand text-brand-ink shadow-[0_3px_0_rgba(0,0,0,0.15)] transition active:scale-90 disabled:opacity-40"
         >

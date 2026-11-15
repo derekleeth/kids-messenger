@@ -7,13 +7,21 @@
 use serde::{Deserialize, Serialize};
 
 pub mod links;
+pub mod media;
 pub mod notes;
 
 /// The protocol version the hub reports in `/hello`; an app refuses a hub with a different major version.
 pub const PROTOCOL_VERSION: u32 = 1;
 
-/// Largest picture the hub accepts, in bytes. The app shrinks pictures well below this before sending.
+/// Largest file the hub takes in one request (`POST /media`, or one chunk of a bigger upload), in bytes. The small
+/// picture each photo and video is shown with in the chat is well below it.
 pub const MAX_MEDIA_BYTES: usize = 15 * 1024 * 1024;
+
+/// Largest full-size photo or video, sent in chunks (`/media/uploads`), in bytes.
+pub const MAX_ORIGINAL_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// The size of each chunk of a big upload. Well under Cloudflare's 100 MB limit on one request.
+pub const UPLOAD_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 
 /// Longest text message, in characters.
 pub const MAX_TEXT_CHARS: usize = 4000;
@@ -75,9 +83,28 @@ pub enum MessageBody {
         text: String,
     },
     Image {
+        /// The picture the chat shows: at most 1920 pixels on its longest side.
         media_id: String,
         width: u32,
         height: u32,
+        #[serde(default)]
+        caption: String,
+        /// The photo at its full size, opened when it's tapped. `None` for pictures sent before 0.2, and for types
+        /// whose hidden data the app can't take out (HEIC).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        full_media_id: Option<String>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        full_bytes: u64,
+    },
+    Video {
+        video_media_id: String,
+        /// A still from the video (a JPEG), shown until it's played.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        poster_media_id: Option<String>,
+        width: u32,
+        height: u32,
+        duration_ms: u64,
+        bytes: u64,
         #[serde(default)]
         caption: String,
     },
@@ -95,6 +122,29 @@ pub enum MessageBody {
         /// A family list everyone can open and edit; otherwise the card is all the others see.
         shared: bool,
     },
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+impl MessageBody {
+    /// The media IDs this message points at.
+    pub fn media_ids_mut(&mut self) -> Vec<&mut String> {
+        match self {
+            MessageBody::Image { media_id, full_media_id, .. } => {
+                let mut ids = vec![media_id];
+                ids.extend(full_media_id.as_mut());
+                ids
+            }
+            MessageBody::Video { video_media_id, poster_media_id, .. } => {
+                let mut ids: Vec<&mut String> = poster_media_id.as_mut().into_iter().collect();
+                ids.push(video_media_id);
+                ids
+            }
+            _ => Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -225,6 +275,22 @@ pub struct Uploaded {
     pub media_id: String,
 }
 
+/// Starts a big upload (`POST /media/uploads`), sent afterwards in chunks of `UPLOAD_CHUNK_BYTES`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewUpload {
+    pub size: u64,
+}
+
+/// A big upload in progress: how much of it the hub has, so a device that lost its connection carries on from there.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadState {
+    pub upload_id: String,
+    pub size: u64,
+    pub received: u64,
+}
+
 /// Everything that changed since a device last synced. `since = 0` is a first sync: all members and chats, the newest
 /// messages of each chat, and every note the device's member can see.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -288,12 +354,37 @@ mod tests {
 
     #[test]
     fn message_body_is_tagged_camel_case() {
-        let body = MessageBody::Image { media_id: "m1".into(), width: 10, height: 20, caption: String::new() };
+        let body = MessageBody::Image {
+            media_id: "m1".into(),
+            width: 10,
+            height: 20,
+            caption: String::new(),
+            full_media_id: None,
+            full_bytes: 0,
+        };
         let json = serde_json::to_value(&body).unwrap();
         assert_eq!(json["kind"], "image");
         assert_eq!(json["mediaId"], "m1");
+        assert!(json.get("fullMediaId").is_none());
         let back: MessageBody = serde_json::from_value(json).unwrap();
         assert_eq!(back, body);
+    }
+
+    #[test]
+    fn videos_round_trip() {
+        let body = MessageBody::Video {
+            video_media_id: "v".into(),
+            poster_media_id: Some("p".into()),
+            width: 1080,
+            height: 1920,
+            duration_ms: 4200,
+            bytes: 9_000_000,
+            caption: "hi".into(),
+        };
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["kind"], "video");
+        assert_eq!(json["durationMs"], 4200);
+        assert_eq!(serde_json::from_value::<MessageBody>(json).unwrap(), body);
     }
 
     #[test]

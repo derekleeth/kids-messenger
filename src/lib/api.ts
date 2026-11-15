@@ -6,11 +6,13 @@ import type {
   Delta,
   Device,
   Hello,
+  Incoming,
   JoinCode,
   Member,
   Message,
   MessageBody,
   Note,
+  OutgoingMedia,
   Role,
   SharedItem,
 } from "./types";
@@ -39,6 +41,15 @@ async function call<T>(cmd: string, args?: Record<string, unknown>, options?: { 
   return invoke<T>(cmd, args, options);
 }
 
+/** Calls `handler` with each `kit://<name>` event from the Rust side; returns a function that stops listening. */
+export async function onEvent<T>(name: string, handler: (payload: T) => void): Promise<() => void> {
+  if (!isTauri) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<T>(`kit://${name}`, (e) => handler(e.payload));
+}
+
+export const isAndroid = typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
+
 /** Calls `handler` with every change; returns a function that stops listening. */
 export async function onDelta(handler: (delta: Delta) => void): Promise<() => void> {
   if (isTauri) {
@@ -57,18 +68,15 @@ export const api = {
   joinFamily: (a: { url: string; code: string; deviceName: string }) => call<void>("join_family", a),
   signOut: () => call<void>("sign_out"),
   sendMessage: (chatId: string, body: MessageBody) => call<Message>("send_message", { chatId, body }),
-  sendImage: (chatId: string, bytes: Uint8Array, width: number, height: number, caption: string) =>
-    call<Message>("send_image", bytes as unknown as Record<string, unknown>, {
-      headers: {
-        "x-chat-id": chatId,
-        "x-width": String(width),
-        "x-height": String(height),
-        "x-caption": encodeURIComponent(caption),
-      },
-    }),
+  /** Saves bytes the page has (a shrunk picture, a file picked on desktop) for `sendMedia`; returns the path. */
+  stageFile: (bytes: Uint8Array) => call<string>("stage_file", bytes as unknown as Record<string, unknown>),
+  sendMedia: (chatId: string, items: OutgoingMedia[]) => call<Message[]>("send_media", { chatId, items }),
+  /** Android's photo picker; `null` elsewhere. */
+  pickMedia: () => call<SharedItem[] | null>("pick_media"),
   retryMessage: (id: string) => call<void>("retry_message", { id }),
   discardMessage: (id: string) => call<void>("discard_message", { id }),
-  media: (id: string) => call<ArrayBuffer>("media", { id }),
+  /** Where a photo or video is on this device, downloading it first if needed. */
+  mediaFile: (id: string) => call<string>("media_file", { id }),
   olderMessages: (chatId: string, before: string) => call<Message[]>("older_messages", { chatId, before }),
   markRead: (chatId: string, messageId: string) => call<void>("mark_read", { chatId, messageId }),
   react: (messageId: string, emoji: string) => call<void>("react", { messageId, emoji }),
@@ -83,8 +91,7 @@ export const api = {
   devices: () => call<Device[]>("devices"),
   revokeDevice: (id: string) => call<void>("revoke_device", { id }),
   setForeground: (foreground: boolean) => call<void>("set_foreground", { foreground }),
-  takeShared: () => call<SharedItem[]>("take_shared"),
-  readShared: (path: string) => call<ArrayBuffer>("read_shared", { path }),
+  takeShared: () => call<Incoming>("take_shared"),
   scanQr: () => call<string | null>("scan_qr"),
   deviceNameHint: () => call<string>("device_name_hint"),
   log: (level: "info" | "warn" | "error", message: string) => call<void>("log", { level, message }),

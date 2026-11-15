@@ -86,6 +86,33 @@ pub struct Engine {
     foreground: AtomicBool,
     status: Mutex<Status>,
     flushing: tokio::sync::Mutex<()>,
+    /// Wakes the uploader, which sends photos and videos waiting in the outbox.
+    upload_kick: Notify,
+    /// Downloads in progress, by media ID, so two parts of the page asking for one video fetch it once.
+    downloads: tokio::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+/// How a photo or video upload is going, for the message's progress ring (`kit://upload`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadProgress {
+    pub message_id: String,
+    pub sent: u64,
+    pub total: u64,
+}
+
+/// How a download is going (`kit://download`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadProgress {
+    pub media_id: String,
+    pub received: u64,
+    pub total: u64,
+}
+
+/// Files made on this device and not sent yet are named `local-<ulid>` in the media folder.
+pub fn is_local(media_id: &str) -> bool {
+    media_id.starts_with("local-")
 }
 
 const FIRST_RETRY: Duration = Duration::from_secs(2);
@@ -120,12 +147,16 @@ impl Engine {
             foreground: AtomicBool::new(true),
             status: Mutex::new(Status { state, detail: None }),
             flushing: tokio::sync::Mutex::new(()),
+            upload_kick: Notify::new(),
+            downloads: Default::default(),
         });
         if engine.client().is_ok() {
             platform::keep_alive(&engine.app, true);
         }
         let runner = engine.clone();
         tauri::async_runtime::spawn(async move { runner.run().await });
+        let uploader = engine.clone();
+        tauri::async_runtime::spawn(async move { uploader.uploader().await });
         engine
     }
 
@@ -133,9 +164,10 @@ impl Engine {
         self.client.read().unwrap().clone().ok_or(AppError::NotEnrolled)
     }
 
-    /// Asks the background task to send what's waiting now.
+    /// Asks the background tasks to send what's waiting now.
     pub fn kick(&self) {
         self.kick.notify_one();
+        self.upload_kick.notify_one();
     }
 
     pub fn set_foreground(&self, foreground: bool) {
@@ -396,34 +428,17 @@ impl Engine {
     /// Sends the outbox and the notes changed here. Stops at the first sign the hub is unreachable.
     pub async fn flush(&self, client: &HubClient) -> AppResult<()> {
         let _guard = self.flushing.lock().await;
-        for entry in self.store.outbox().await? {
-            if entry.error.is_some() {
+        // A chat's messages go in order: one waiting for its photo or video to upload holds back the ones after it.
+        let mut waiting: std::collections::HashSet<String> = Default::default();
+        for mut entry in self.store.outbox().await? {
+            if entry.error.is_some() || waiting.contains(&entry.chat_id) {
                 continue;
             }
-            let mut body = entry.body.clone();
-            if let Some(local) = &entry.upload {
-                let path = self.media_dir.join(local);
-                let bytes = match tokio::fs::read(&path).await {
-                    Ok(bytes) => bytes,
-                    Err(_) => {
-                        self.failed(&entry.id, "The picture went missing before it was sent.").await?;
-                        continue;
-                    }
-                };
-                let media_id = match client.upload(bytes).await {
-                    Ok(id) => id,
-                    Err(AppError::Hub(msg)) => {
-                        self.failed(&entry.id, &msg).await?;
-                        continue;
-                    }
-                    Err(e) => return Err(e),
-                };
-                let _ = tokio::fs::rename(&path, self.media_dir.join(&media_id)).await;
-                if let MessageBody::Image { media_id: id, .. } = &mut body {
-                    *id = media_id;
-                }
-                self.store.uploaded(&entry.id, &body).await?;
+            if entry.body.media_ids_mut().iter().any(|id| is_local(id)) {
+                waiting.insert(entry.chat_id.clone());
+                continue;
             }
+            let body = entry.body;
             match client.send_message(&entry.chat_id, &SendMessage { id: entry.id.clone(), body }).await {
                 Ok(message) => {
                     self.store.remove_outbox(&entry.id).await?;
@@ -457,6 +472,162 @@ impl Engine {
             }
         }
         Ok(())
+    }
+
+    /// Sends the photos and videos of messages in the outbox, one file at a time, then lets `flush` send the
+    /// messages. Runs apart from the hub connection, so a long video upload doesn't hold up messages coming in.
+    async fn uploader(self: Arc<Self>) {
+        loop {
+            match self.upload_pending().await {
+                Ok(true) => self.kick.notify_one(),
+                Ok(false) => {}
+                Err(AppError::Revoked | AppError::NotEnrolled) => {}
+                Err(e) => {
+                    log::info!("upload: {e}");
+                    // Offline: try again in a while, or when something changes.
+                    let _ = tokio::time::timeout(Duration::from_secs(20), self.upload_kick.notified()).await;
+                    continue;
+                }
+            }
+            self.upload_kick.notified().await;
+        }
+    }
+
+    /// Uploads what's waiting. Says whether a message became ready to send.
+    async fn upload_pending(&self) -> AppResult<bool> {
+        let mut ready = false;
+        for entry in self.store.outbox().await? {
+            if entry.error.is_some() {
+                continue;
+            }
+            let mut body = entry.body.clone();
+            let locals: Vec<String> = body.media_ids_mut().into_iter().filter(|id| is_local(id)).map(|id| id.clone()).collect();
+            if locals.is_empty() {
+                continue;
+            }
+            let client = self.client()?;
+            let mut total = 0;
+            for local in &locals {
+                total += tokio::fs::metadata(self.media_dir.join(local)).await.map(|m| m.len()).unwrap_or(0);
+            }
+            let mut done = 0;
+            let mut failed = false;
+            for local in locals {
+                let path = self.media_dir.join(&local);
+                let media_id = match self.upload_file(&client, &entry.id, &path, &local, done, total).await {
+                    Ok(id) => id,
+                    Err(AppError::Hub(msg)) => {
+                        self.failed(&entry.id, &msg).await?;
+                        failed = true;
+                        break;
+                    }
+                    Err(AppError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                        self.failed(&entry.id, "The picture went missing before it was sent.").await?;
+                        failed = true;
+                        break;
+                    }
+                    Err(e) => return Err(e),
+                };
+                done += tokio::fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
+                let _ = tokio::fs::rename(&path, self.media_dir.join(&media_id)).await;
+                for id in body.media_ids_mut() {
+                    if *id == local {
+                        *id = media_id.clone();
+                    }
+                }
+                self.store.uploaded(&entry.id, &body).await?;
+                self.store.set(&format!("upload:{local}"), "").await?;
+            }
+            if !failed {
+                ready = true;
+            }
+        }
+        Ok(ready)
+    }
+
+    /// One file: in one request when it's a small picture, in chunks (resumed if a try was cut off) otherwise.
+    async fn upload_file(
+        &self,
+        client: &HubClient,
+        message_id: &str,
+        path: &std::path::Path,
+        local: &str,
+        done: u64,
+        total: u64,
+    ) -> AppResult<String> {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        let progress = |sent: u64| {
+            let p = UploadProgress { message_id: message_id.to_string(), sent: done + sent, total };
+            let _ = self.app.emit("kit://upload", p);
+        };
+        let size = tokio::fs::metadata(path).await?.len();
+        let mut file = tokio::fs::File::open(path).await?;
+        let mut head = [0u8; 16];
+        let n = file.read(&mut head).await?;
+        let kind = kit_protocol::media::sniff(&head[..n]).unwrap_or_default();
+        if size <= 2 * 1024 * 1024 && kit_protocol::media::is_shown_picture(kind) {
+            let bytes = tokio::fs::read(path).await?;
+            let id = client.upload(bytes).await?;
+            progress(size);
+            return Ok(id);
+        }
+        let key = format!("upload:{local}");
+        let resumed = match self.store.get(&key).await?.filter(|id| !id.is_empty()) {
+            Some(id) => match client.upload_state(&id).await {
+                Ok(state) if state.size == size => Some(state),
+                Ok(_) | Err(AppError::Hub(_)) => None,
+                Err(e) => return Err(e),
+            },
+            None => None,
+        };
+        let mut state = match resumed {
+            Some(state) => state,
+            None => {
+                let started = client.start_upload(size).await?;
+                self.store.set(&key, &started.upload_id).await?;
+                started
+            }
+        };
+        let mut chunk = vec![0u8; kit_protocol::UPLOAD_CHUNK_BYTES];
+        while state.received < size {
+            progress(state.received);
+            file.seek(std::io::SeekFrom::Start(state.received)).await?;
+            let want = ((size - state.received) as usize).min(chunk.len());
+            file.read_exact(&mut chunk[..want]).await?;
+            state = match client.upload_chunk(&state.upload_id, state.received, chunk[..want].to_vec()).await {
+                Ok(state) => state,
+                // The hub has a different amount than this device thought (a chunk whose answer was lost): ask it.
+                Err(AppError::Hub(_)) => client.upload_state(&state.upload_id).await?,
+                Err(e) => return Err(e),
+            };
+        }
+        progress(size);
+        client.finish_upload(&state.upload_id).await
+    }
+
+    /// Where a photo or video is on this device, downloading it from the hub first when it isn't here yet.
+    pub async fn media_file(&self, id: &str) -> AppResult<PathBuf> {
+        let path = self.media_dir.join(id);
+        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            return Ok(path);
+        }
+        if is_local(id) {
+            return Err(AppError::Invalid("That picture isn't on this device anymore.".into()));
+        }
+        let lock = self.downloads.lock().await.entry(id.to_string()).or_default().clone();
+        let _held = lock.lock().await;
+        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            return Ok(path);
+        }
+        let part = self.media_dir.join(format!("{id}.part"));
+        let progress = |received: u64, total: u64| {
+            let _ = self.app.emit("kit://download", DownloadProgress { media_id: id.to_string(), received, total });
+        };
+        let result = self.client()?.download(id, &part, progress).await;
+        self.downloads.lock().await.remove(id);
+        result?;
+        tokio::fs::rename(&part, &path).await?;
+        Ok(path)
     }
 
     async fn failed(&self, id: &str, msg: &str) -> AppResult<()> {
@@ -496,6 +667,8 @@ impl Engine {
             MessageBody::Text { text } => text.chars().take(140).collect(),
             MessageBody::Image { caption, .. } if !caption.is_empty() => format!("📷 {caption}"),
             MessageBody::Image { .. } => "📷 Sent a picture".to_string(),
+            MessageBody::Video { caption, .. } if !caption.is_empty() => format!("🎬 {caption}"),
+            MessageBody::Video { .. } => "🎬 Sent a video".to_string(),
             MessageBody::Sticker { .. } => "Sent a sticker".to_string(),
             MessageBody::Note { title, .. } => format!("📝 Shared \"{title}\""),
         };

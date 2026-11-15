@@ -1,0 +1,2 @@
+# The hub checks its database migrations by checksum: the same bytes on every checkout.
+hub/migrations/*.sql text eol=lf

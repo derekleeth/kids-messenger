@@ -28,7 +28,27 @@ export interface Chat {
 
 export type MessageBody =
   | { kind: "text"; text: string }
-  | { kind: "image"; mediaId: string; width: number; height: number; caption: string }
+  | {
+      kind: "image";
+      /** What the chat shows: at most 1920 pixels across. */
+      mediaId: string;
+      width: number;
+      height: number;
+      caption: string;
+      /** The photo at full size, opened when it's tapped. */
+      fullMediaId?: string | null;
+      fullBytes?: number;
+    }
+  | {
+      kind: "video";
+      videoMediaId: string;
+      posterMediaId?: string | null;
+      width: number;
+      height: number;
+      durationMs: number;
+      bytes: number;
+      caption: string;
+    }
   | { kind: "sticker"; sticker: string }
   | { kind: "note"; noteId: string; title: string; emoji: string; preview: string[]; shared: boolean };
 
@@ -125,12 +145,32 @@ export interface JoinCode {
   qrSvg: string;
 }
 
+/** A photo or video ready to send (copied into the app's cache, with a small preview), or text shared in. */
 export interface SharedItem {
-  kind: "image" | "text";
+  kind: "image" | "video" | "text";
   path: string;
+  previewPath?: string | null;
+  width: number;
+  height: number;
+  durationMs: number;
   mime: string;
-  name: string;
   text: string;
+}
+
+export interface Incoming {
+  items: SharedItem[];
+  problem?: string | null;
+}
+
+/** What `send_media` takes for each photo or video. */
+export interface OutgoingMedia {
+  kind: "image" | "video";
+  path: string;
+  previewPath: string | null;
+  width: number;
+  height: number;
+  durationMs: number;
+  caption: string;
 }
 
 export const COLORS = ["sun", "sky", "bubblegum", "mint", "grape", "tangerine"] as const;

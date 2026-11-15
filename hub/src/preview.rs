@@ -68,7 +68,7 @@ impl Fetcher {
         if !is_html {
             // A link straight to a picture: show the picture.
             let bytes = read_limited(response, IMAGE_LIMIT).await?;
-            let kind = crate::images::sniff(&bytes)?;
+            let kind = kit_protocol::media::sniff(&bytes).filter(|k| kit_protocol::media::is_shown_picture(k))?;
             let title = final_url.path_segments().and_then(|mut s| s.next_back()).unwrap_or_default().to_string();
             let preview =
                 LinkPreview { url: url.into(), title, description: String::new(), site, image_media_id: None };
@@ -100,7 +100,7 @@ impl Fetcher {
             return None;
         }
         let bytes = read_limited(response, IMAGE_LIMIT).await?;
-        let kind = crate::images::sniff(&bytes)?;
+        let kind = kit_protocol::media::sniff(&bytes).filter(|k| kit_protocol::media::is_shown_picture(k))?;
         Some((bytes, kind))
     }
 }

@@ -74,7 +74,8 @@ Register-ScheduledTask -TaskName "KitChat hub" -Action $action -Trigger $trigger
 Also turn off sleep for that PC when plugged in (Settings › System › Power), or messages wait until it wakes up.
 
 **Back up** the `hub-data` folder now and then (copy it while the hub is stopped, or any time: SQLite's files can be
-copied safely when nothing is being sent). It holds every message and picture.
+copied safely when nothing is being sent). It holds every message, photo and video. Full-size photos and videos add
+up: a minute of phone video is around 100-200 MB, so keep an eye on the drive it's on.
 
 ## 5. Reaching it away from home (optional)
 

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use kit_protocol::notes::Note;
 use kit_protocol::{Chat, Device, EnrollRequest, Hello, Member, MemberUpdate, MessageBody, NewMember, SetupRequest};
 use serde::Serialize;
-use tauri::ipc::{InvokeBody, Request, Response};
+use tauri::ipc::{InvokeBody, Request};
 use tauri::{AppHandle, State};
 
 use crate::engine::{Delta, Engine};
@@ -102,35 +102,17 @@ pub async fn send_message(engine: Eng<'_>, chat_id: String, body: MessageBody) -
     queue(&engine, chat_id, body, None).await
 }
 
-/// A picture, already shrunk and re-drawn by the page (which drops its EXIF data), as the raw request body. The
-/// chat and size come in headers: `x-chat-id`, `x-width`, `x-height`, and `x-caption` (URL-encoded).
-#[tauri::command]
-pub async fn send_image(engine: Eng<'_>, request: Request<'_>) -> AppResult<UiMessage> {
-    // Desktop sends the bytes as they are. Android's WebView can't hand a request body over, so Tauri sends them
-    // through postMessage as JSON instead: an array of numbers.
-    let json_bytes;
-    let bytes: &[u8] = match request.body() {
-        InvokeBody::Raw(bytes) => bytes,
-        InvokeBody::Json(value) => {
-            json_bytes = picture_from_json(value).ok_or_else(|| AppError::Invalid("No picture came through.".into()))?;
-            &json_bytes
-        }
+/// The bytes of a call's body. Desktop sends them as they are; Android's WebView can't hand a request body over, so
+/// Tauri sends them through postMessage as JSON instead: an array of numbers.
+fn body_bytes(request: &Request<'_>) -> AppResult<Vec<u8>> {
+    let bytes = match request.body() {
+        InvokeBody::Raw(bytes) => bytes.clone(),
+        InvokeBody::Json(value) => picture_from_json(value).unwrap_or_default(),
     };
     if bytes.is_empty() {
         return Err(AppError::Invalid("No picture came through.".into()));
     }
-    if bytes.len() > kit_protocol::MAX_MEDIA_BYTES {
-        return Err(AppError::Invalid("That picture is too big.".into()));
-    }
-    let header = |name: &str| request.headers().get(name).and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
-    let chat_id = header("x-chat-id");
-    let width = header("x-width").parse().unwrap_or(0);
-    let height = header("x-height").parse().unwrap_or(0);
-    let caption = percent_decode(&header("x-caption"));
-    let local = format!("local-{}", ulid::Ulid::new());
-    tokio::fs::write(engine.media_dir.join(&local), bytes).await?;
-    let body = MessageBody::Image { media_id: local.clone(), width, height, caption };
-    queue(&engine, chat_id, body, Some(local)).await
+    Ok(bytes)
 }
 
 /// Picture bytes sent as JSON: an array of numbers, or an object of index to number (a typed array serialized as is).
@@ -149,6 +131,162 @@ fn picture_from_json(value: &serde_json::Value) -> Option<Vec<u8>> {
     }
 }
 
+/// Where files on their way out wait: the page's pictures (`stage_file`), and on Android the photos and videos picked
+/// or shared in (KitPlugin.kt puts them under the same cache folder).
+fn cache_dir(app: &AppHandle) -> AppResult<std::path::PathBuf> {
+    use tauri::Manager;
+    Ok(app.path().app_cache_dir()?)
+}
+
+/// A file in the app's cache, as the page names it. Anything else is refused.
+fn cached_file(app: &AppHandle, path: &str) -> AppResult<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(path);
+    let cache = cache_dir(app)?;
+    let inside = path.canonicalize().ok().zip(cache.canonicalize().ok()).is_some_and(|(p, c)| p.starts_with(c));
+    if !inside || !path.is_file() {
+        return Err(AppError::Invalid("That file isn't one this app made.".into()));
+    }
+    Ok(path)
+}
+
+/// Saves a file the page made or was given (a picture shrunk for the chat, a photo or video picked on desktop) in the
+/// cache, for `send_media`. Returns where it is.
+#[tauri::command]
+pub async fn stage_file(app: AppHandle, request: Request<'_>) -> AppResult<String> {
+    let bytes = body_bytes(&request)?;
+    if bytes.len() as u64 > kit_protocol::MAX_ORIGINAL_BYTES {
+        return Err(AppError::Invalid("That's too big to send.".into()));
+    }
+    let dir = cache_dir(&app)?.join("outgoing");
+    tokio::fs::create_dir_all(&dir).await?;
+    let path = dir.join(ulid::Ulid::new().to_string());
+    tokio::fs::write(&path, &bytes).await?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// A photo or video to send, with the small picture the chat shows for it.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutgoingMedia {
+    /// "image" or "video".
+    pub kind: String,
+    /// The file as it was taken (in the app's cache).
+    pub path: String,
+    /// A JPEG at most 1920 pixels across: the photo shrunk, or a still from the video.
+    pub preview_path: Option<String>,
+    /// The size of the picture or video as it's shown (rotation applied).
+    pub width: u32,
+    pub height: u32,
+    #[serde(default)]
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub caption: String,
+}
+
+/// Moves a file into the media folder as `local-<ulid>`, ready to upload.
+async fn adopt(engine: &Engine, from: &std::path::Path) -> AppResult<(String, std::path::PathBuf)> {
+    let local = format!("local-{}", ulid::Ulid::new());
+    let to = engine.media_dir.join(&local);
+    if tokio::fs::rename(from, &to).await.is_err() {
+        tokio::fs::copy(from, &to).await?;
+        let _ = tokio::fs::remove_file(from).await;
+    }
+    Ok((local, to))
+}
+
+async fn sniff_file(path: &std::path::Path) -> AppResult<&'static str> {
+    use tokio::io::AsyncReadExt;
+    let mut head = [0u8; 16];
+    let n = tokio::fs::File::open(path).await?.read(&mut head).await?;
+    Ok(kit_protocol::media::sniff(&head[..n]).unwrap_or_default())
+}
+
+/// Photos and videos at their full size. The hidden data that says where they were taken comes out here, before
+/// anything leaves the device. Each becomes a message in the outbox, sent once its files are uploaded.
+#[tauri::command]
+pub async fn send_media(
+    app: AppHandle,
+    engine: Eng<'_>,
+    chat_id: String,
+    items: Vec<OutgoingMedia>,
+) -> AppResult<Vec<UiMessage>> {
+    use kit_protocol::media;
+    let mut sent = Vec::new();
+    for item in items {
+        let original = cached_file(&app, &item.path)?;
+        let preview = item.preview_path.as_deref().map(|p| cached_file(&app, p)).transpose()?;
+        let size = tokio::fs::metadata(&original).await?.len();
+        if size > kit_protocol::MAX_ORIGINAL_BYTES {
+            return Err(AppError::Invalid("That's too big to send (the most is 1 GB). Try a shorter video.".into()));
+        }
+        let kind = sniff_file(&original).await?;
+        let caption = item.caption.trim().to_string();
+        let (width, height) = (item.width.max(1), item.height.max(1));
+        let body = if item.kind == "video" {
+            if !media::is_video(kind) {
+                return Err(AppError::Invalid("Only MP4 videos can be sent.".into()));
+            }
+            let (video_id, video_path) = adopt(&engine, &original).await?;
+            let path = video_path.clone();
+            let cleaned = tokio::task::spawn_blocking(move || media::clean_video_file(&path))
+                .await
+                .map_err(|e| AppError::Other(e.to_string()))?;
+            if let Err(e) = cleaned {
+                let _ = tokio::fs::remove_file(&video_path).await;
+                return Err(AppError::Invalid(format!("That video can't be read ({e}).")));
+            }
+            let poster = match &preview {
+                Some(p) => Some(adopt(&engine, p).await?.0),
+                None => None,
+            };
+            MessageBody::Video {
+                video_media_id: video_id,
+                poster_media_id: poster,
+                width,
+                height,
+                duration_ms: item.duration_ms,
+                bytes: size,
+                caption,
+            }
+        } else {
+            // A GIF stays as it is (shrinking it would stop it moving), as does any small picture without a preview.
+            let as_is = kind == "image/gif" || (preview.is_none() && media::is_shown_picture(kind));
+            if as_is && size as usize > kit_protocol::MAX_MEDIA_BYTES {
+                return Err(AppError::Invalid("That picture is too big.".into()));
+            }
+            let shown = match (&preview, as_is) {
+                (_, true) => &original,
+                (Some(p), false) => p,
+                (None, false) => return Err(AppError::Invalid("That picture can't be opened.".into())),
+            };
+            let bytes = media::clean_photo(&tokio::fs::read(shown).await?);
+            let shown_id = format!("local-{}", ulid::Ulid::new());
+            tokio::fs::write(engine.media_dir.join(&shown_id), &bytes).await?;
+            let _ = tokio::fs::remove_file(shown).await;
+            // The full photo too, when the app knows how to take its hidden data out (JPEG, PNG).
+            let mut full = None;
+            if !as_is && media::is_full_photo(kind) {
+                let bytes = media::clean_photo(&tokio::fs::read(&original).await?);
+                let full_id = format!("local-{}", ulid::Ulid::new());
+                tokio::fs::write(engine.media_dir.join(&full_id), &bytes).await?;
+                full = Some((full_id, bytes.len() as u64));
+            }
+            let _ = tokio::fs::remove_file(&original).await;
+            MessageBody::Image {
+                media_id: shown_id,
+                width,
+                height,
+                caption,
+                full_bytes: full.as_ref().map(|f| f.1).unwrap_or(0),
+                full_media_id: full.map(|f| f.0),
+            }
+        };
+        let first = body.clone().media_ids_mut().first().map(|id| id.to_string());
+        sent.push(queue(&engine, chat_id.clone(), body, first).await?);
+    }
+    Ok(sent)
+}
+
 #[tauri::command]
 pub async fn retry_message(engine: Eng<'_>, id: String) -> AppResult<()> {
     engine.store.outbox_failed(&id, None).await?;
@@ -162,27 +300,22 @@ pub async fn retry_message(engine: Eng<'_>, id: String) -> AppResult<()> {
 
 #[tauri::command]
 pub async fn discard_message(engine: Eng<'_>, id: String) -> AppResult<()> {
-    if let Some(entry) = engine.store.outbox_entry(&id).await?
-        && let Some(local) = entry.upload
-    {
-        let _ = tokio::fs::remove_file(engine.media_dir.join(local)).await;
+    if let Some(mut entry) = engine.store.outbox_entry(&id).await? {
+        for local in entry.body.media_ids_mut().into_iter().filter(|id| crate::engine::is_local(id)) {
+            let _ = tokio::fs::remove_file(engine.media_dir.join(local.as_str())).await;
+        }
     }
     engine.store.remove_outbox(&id).await
 }
 
-/// A picture's bytes: from this device's cache, or fetched from the hub (and cached).
+/// Where a photo or video is on this device (for the page to show through the asset protocol), fetching it from the
+/// hub first when it isn't here yet. `kit://download` events say how that's going.
 #[tauri::command]
-pub async fn media(engine: Eng<'_>, id: String) -> AppResult<Response> {
+pub async fn media_file(engine: Eng<'_>, id: String) -> AppResult<String> {
     if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return Err(AppError::Invalid("bad picture ID".into()));
     }
-    let path = engine.media_dir.join(&id);
-    if let Ok(bytes) = tokio::fs::read(&path).await {
-        return Ok(Response::new(bytes));
-    }
-    let bytes = engine.client()?.media(&id).await?;
-    let _ = tokio::fs::write(&path, &bytes).await;
-    Ok(Response::new(bytes))
+    Ok(engine.media_file(&id).await?.to_string_lossy().into_owned())
 }
 
 /// Older messages of a chat, before `before`: from the local copy, or from the hub when it has run out.
@@ -316,24 +449,16 @@ pub fn set_foreground(engine: Eng<'_>, foreground: bool) {
 }
 
 #[tauri::command]
-pub async fn take_shared(app: AppHandle) -> Vec<SharedItem> {
+pub async fn take_shared(app: AppHandle) -> platform::Incoming {
     platform::take_shared(&app).await
 }
 
-/// A picture shared in from another app, read once from the app's cache and then deleted.
+/// Android's photo picker. `null` on desktop, where the page uses a file input.
 #[tauri::command]
-pub async fn read_shared(app: AppHandle, path: String) -> AppResult<Response> {
-    use tauri::Manager;
-    let cache = app.path().app_cache_dir()?.join("shared");
-    let path = std::path::PathBuf::from(path);
-    let inside = path.canonicalize().ok().zip(cache.canonicalize().ok()).is_some_and(|(p, c)| p.starts_with(c));
-    if !inside {
-        return Err(AppError::Invalid("That file isn't one that was shared.".into()));
-    }
-    let bytes = tokio::fs::read(&path).await?;
-    let _ = tokio::fs::remove_file(&path).await;
-    Ok(Response::new(bytes))
+pub async fn pick_media(app: AppHandle) -> AppResult<Option<Vec<SharedItem>>> {
+    platform::pick_media(&app).await.transpose().map_err(AppError::Other)
 }
+
 
 #[tauri::command]
 pub async fn scan_qr(app: AppHandle) -> Result<Option<String>, String> {
@@ -366,6 +491,7 @@ fn percent_encode(s: &str) -> String {
         .collect()
 }
 
+#[cfg(test)]
 fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());

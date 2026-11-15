@@ -27,7 +27,9 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls-no-p
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 url = "2"
+# Sending photos and videos with Range support, so a video can be resumed or played from the middle.
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs"] }
 
 [dev-dependencies]
-tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

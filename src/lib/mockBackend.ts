@@ -6,7 +6,7 @@
 //
 // Others reply now and then, and links get a preview, so the chat feels alive.
 
-import type { Account, Chat, Delta, Device, Member, Message, MessageBody, Note, Status } from "./types";
+import type { Account, Chat, Delta, Device, Member, Message, MessageBody, Note, OutgoingMedia, Status } from "./types";
 
 type Listener = (d: Delta) => void;
 const listeners = new Set<Listener>();
@@ -83,6 +83,19 @@ const DEMO_PICTURE = `<svg xmlns="http://www.w3.org/2000/svg" width="640" height
 <rect x="385" y="260" width="30" height="40" fill="#fde68a"/></svg>`;
 
 const media = new Map<string, Uint8Array>([["MEDIA-DEMO", new TextEncoder().encode(DEMO_PICTURE)]]);
+/** Files the page staged for `send_media`, by their pretend path. */
+const staged = new Map<string, Uint8Array>();
+
+function typeOf(bytes: Uint8Array): string {
+  if (bytes[0] === 0xff && bytes[1] === 0xd8) return "image/jpeg";
+  if (bytes[0] === 0x89 && bytes[1] === 0x50) return "image/png";
+  if (bytes[0] === 0x47 && bytes[1] === 0x49) return "image/gif";
+  if (bytes[8] === 0x57 && bytes[9] === 0x45) return "image/webp";
+  if (bytes[4] === 0x66 && bytes[5] === 0x74) return "video/mp4";
+  if (bytes[0] === 0x1a && bytes[1] === 0x45) return "video/webm";
+  if (bytes[0] === 0x3c) return "image/svg+xml";
+  return "application/octet-stream";
+}
 
 const messages: Message[] = [
   msg("C-FAMILY", "M-MOM", { kind: "text", text: "Dinner at 6! 🍝" }, 60 * 25),
@@ -245,7 +258,6 @@ function wait(ms = 120) {
 export async function mockInvoke<T>(
   cmd: string,
   args: Record<string, unknown> = {},
-  options?: { headers: Record<string, string> },
 ): Promise<T> {
   await wait(40);
   const a = args as Record<string, never>;
@@ -284,28 +296,62 @@ export async function mockInvoke<T>(
       return undefined as T;
     case "send_message":
       return sent(String(a.chatId), a.body as MessageBody) as T;
-    case "send_image": {
-      const bytes = args as unknown as Uint8Array;
-      const mediaId = id();
-      media.set(mediaId, new Uint8Array(bytes));
-      const h = options!.headers;
-      return sent(h["x-chat-id"], {
-        kind: "image",
-        mediaId,
-        width: Number(h["x-width"]),
-        height: Number(h["x-height"]),
-        caption: decodeURIComponent(h["x-caption"] ?? ""),
-      }) as T;
+    case "stage_file": {
+      const path = `staged-${id()}`;
+      staged.set(path, new Uint8Array(args as unknown as Uint8Array));
+      return path as T;
     }
+    case "send_media": {
+      const out: Message[] = [];
+      for (const item of a.items as OutgoingMedia[]) {
+        const original = staged.get(item.path);
+        const preview = item.previewPath ? staged.get(item.previewPath) : undefined;
+        if (!original) throw "That file isn't one this app made.";
+        const keep = (bytes: Uint8Array) => {
+          const mediaId = id();
+          media.set(mediaId, bytes);
+          return mediaId;
+        };
+        if (item.kind === "video") {
+          out.push(
+            sent(String(a.chatId), {
+              kind: "video",
+              videoMediaId: keep(original),
+              posterMediaId: preview ? keep(preview) : null,
+              width: item.width,
+              height: item.height,
+              durationMs: item.durationMs,
+              bytes: original.length,
+              caption: item.caption,
+            }),
+          );
+        } else {
+          out.push(
+            sent(String(a.chatId), {
+              kind: "image",
+              mediaId: keep(preview ?? original),
+              width: item.width,
+              height: item.height,
+              caption: item.caption,
+              fullMediaId: preview ? keep(original) : null,
+              fullBytes: preview ? original.length : 0,
+            }),
+          );
+        }
+      }
+      return out as T;
+    }
+    case "pick_media":
+      return null as T;
     case "retry_message":
     case "discard_message":
     case "set_foreground":
     case "log":
       return undefined as T;
-    case "media": {
+    case "media_file": {
       const bytes = media.get(String(a.id));
       if (!bytes) throw "That picture is gone.";
-      return bytes.slice().buffer as T;
+      return URL.createObjectURL(new Blob([bytes.slice()], { type: typeOf(bytes) })) as T;
     }
     case "older_messages":
       return [] as T;
@@ -384,7 +430,7 @@ export async function mockInvoke<T>(
     case "revoke_device":
       return undefined as T;
     case "take_shared":
-      return [] as T;
+      return { items: [] } as T;
     case "scan_qr":
       throw "Scanning needs a camera. Type the code instead.";
     case "device_name_hint":

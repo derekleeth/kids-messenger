@@ -13,19 +13,36 @@ use tauri::{AppHandle, Runtime};
 #[cfg(target_os = "android")]
 pub struct KitPlugin<R: Runtime>(tauri::plugin::PluginHandle<R>);
 
-/// Something shared to KitChat from another app: a picture (saved in the app's cache) or text such as a link.
+/// Something shared to KitChat from another app, or picked from the photo picker: a photo or video (copied into the
+/// app's cache, with a small preview made next to it), or text such as a link.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedItem {
+    /// "image", "video" or "text".
     pub kind: String,
     #[serde(default)]
     pub path: String,
     #[serde(default)]
+    pub preview_path: Option<String>,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    #[serde(default)]
+    pub duration_ms: u64,
+    #[serde(default)]
     pub mime: String,
     #[serde(default)]
-    pub name: String,
-    #[serde(default)]
     pub text: String,
+}
+
+/// What came in, and what went wrong with anything that didn't (too big, unreadable).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Incoming {
+    pub items: Vec<SharedItem>,
+    #[serde(default)]
+    pub problem: Option<String>,
 }
 
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
@@ -98,23 +115,35 @@ pub async fn local_network<R: Runtime>(app: &AppHandle<R>) -> bool {
 }
 
 /// What's been shared into the app since the last call (Android's share sheet).
-pub async fn take_shared<R: Runtime>(app: &AppHandle<R>) -> Vec<SharedItem> {
+pub async fn take_shared<R: Runtime>(app: &AppHandle<R>) -> Incoming {
     #[cfg(target_os = "android")]
     if let Some(p) = plugin(app) {
-        #[derive(Deserialize)]
-        struct Shared {
-            items: Vec<SharedItem>,
-        }
-        return match p.0.run_mobile_plugin_async::<Shared>("takeShared", serde_json::json!({})).await {
-            Ok(shared) => shared.items,
+        return match p.0.run_mobile_plugin_async::<Incoming>("takeShared", serde_json::json!({})).await {
+            Ok(shared) => shared,
             Err(e) => {
                 log::warn!("shared items: {e}");
-                Vec::new()
+                Incoming::default()
             }
         };
     }
     let _ = app;
-    Vec::new()
+    Incoming::default()
+}
+
+/// Photos and videos from Android's photo picker, ready for `send_media`. `None` where there's no such picker (the
+/// page uses a file input there).
+pub async fn pick_media<R: Runtime>(app: &AppHandle<R>) -> Option<Result<Vec<SharedItem>, String>> {
+    #[cfg(target_os = "android")]
+    if let Some(p) = plugin(app) {
+        return Some(
+            p.0.run_mobile_plugin_async::<Incoming>("pickMedia", serde_json::json!({}))
+                .await
+                .map(|picked| picked.items)
+                .map_err(|e| e.to_string()),
+        );
+    }
+    let _ = app;
+    None
 }
 
 /// Scans a QR code with the camera (Android, through Google's code scanner). `None` when cancelled.

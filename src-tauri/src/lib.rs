@@ -80,11 +80,20 @@ pub fn run() {
             let store = tauri::async_runtime::block_on(store::Store::open(&data_dir.join("kitchat.db")))
                 .inspect_err(|e| log::error!("could not open the database in {}: {e}", data_dir.display()))?;
             let tokens = secret::TokenStore::new(&data_dir, &profile);
+            // The page shows photos and videos straight from the media folder (convertFileSrc), so a big video
+            // streams from disk instead of crossing the IPC bridge.
+            let media_dir = data_dir.join("media");
+            std::fs::create_dir_all(&media_dir)?;
+            app.asset_protocol_scope().allow_directory(&media_dir, false)?;
+            // And the previews of photos and videos picked on Android, shown in the box before they're sent.
+            let outgoing = app.path().app_cache_dir()?.join("outgoing");
+            std::fs::create_dir_all(&outgoing)?;
+            app.asset_protocol_scope().allow_directory(&outgoing, false)?;
             let engine = tauri::async_runtime::block_on(engine::Engine::start(
                 app.handle().clone(),
                 store,
                 tokens,
-                data_dir.join("media"),
+                media_dir,
             ));
             app.manage(engine);
             Ok(())
@@ -96,10 +105,11 @@ pub fn run() {
             commands::join_family,
             commands::sign_out,
             commands::send_message,
-            commands::send_image,
+            commands::stage_file,
+            commands::send_media,
             commands::retry_message,
             commands::discard_message,
-            commands::media,
+            commands::media_file,
             commands::older_messages,
             commands::mark_read,
             commands::react,
@@ -113,7 +123,7 @@ pub fn run() {
             commands::revoke_device,
             commands::set_foreground,
             commands::take_shared,
-            commands::read_shared,
+            commands::pick_media,
             commands::scan_qr,
             commands::device_name_hint,
             commands::log,

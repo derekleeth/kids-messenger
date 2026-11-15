@@ -4,8 +4,10 @@ A private, bright and friendly messenger for our family, with Kit the baby lynx.
 pictures and screenshots, share links and make lists, all with only the family, and without any outside service.
 
 - **Chats**: one family group chat and a 1:1 chat with each person. Text, emoji, Kit stickers, reactions, "seen".
-- **Pictures and screenshots**: from the gallery or camera, pasted, dragged in, or shared from any app with
-  Android's Share button. Location data (EXIF) is removed, on the device and again on the hub.
+- **Photos, videos and screenshots** at full size: from the photo picker, pasted, dragged in, or shared from any app
+  with Android's Share button. The chat shows a small copy; tapping opens the full photo or plays the video. Big files
+  upload in 4 MB chunks and carry on where they stopped after a dropped connection (up to 1 GB each). Location data
+  (photo EXIF, a video's GPS boxes) is removed on the device and again on the hub.
 - **Links**: shown as cards with a title and picture (fetched by the hub, not the tablet), and always opened in the
   browser.
 - **Lists and notes**: checklists, cool sites, big ideas. Private by default; send one to a chat or make it a

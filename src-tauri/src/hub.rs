@@ -176,18 +176,68 @@ impl HubClient {
         Ok(uploaded.media_id)
     }
 
-    pub async fn media(&self, id: &str) -> AppResult<Vec<u8>> {
-        let res = self
-            .req(reqwest::Method::GET, &format!("/media/{id}"))
-            .send()
-            .await
-            .map_err(|e| AppError::Offline(e.to_string()))?;
-        match res.status() {
-            s if s.is_success() => Ok(res.bytes().await.map_err(|e| AppError::Offline(e.to_string()))?.to_vec()),
-            reqwest::StatusCode::UNAUTHORIZED => Err(AppError::Revoked),
-            reqwest::StatusCode::NOT_FOUND => Err(AppError::Hub("That picture is gone.".into())),
-            s => Err(AppError::Offline(format!("picture: {s}"))),
+    /// Starts a big upload (a full-size photo or a video).
+    pub async fn start_upload(&self, size: u64) -> AppResult<UploadState> {
+        self.post("/media/uploads", &NewUpload { size }).await
+    }
+
+    pub async fn upload_state(&self, id: &str) -> AppResult<UploadState> {
+        self.get(&format!("/media/uploads/{id}")).await
+    }
+
+    pub async fn upload_chunk(&self, id: &str, offset: u64, bytes: Vec<u8>) -> AppResult<UploadState> {
+        self.send(
+            self.req(reqwest::Method::PUT, &format!("/media/uploads/{id}?offset={offset}"))
+                .header("Content-Type", "application/octet-stream")
+                // A 4 MB chunk over a slow upload (a phone on mobile data) can take a while.
+                .timeout(Duration::from_secs(300))
+                .body(bytes),
+        )
+        .await
+    }
+
+    pub async fn finish_upload(&self, id: &str) -> AppResult<String> {
+        let req = self.req(reqwest::Method::POST, &format!("/media/uploads/{id}/finish")).timeout(Duration::from_secs(300));
+        let uploaded: Uploaded = self.send(req).await?;
+        Ok(uploaded.media_id)
+    }
+
+    /// Downloads a photo or video to `part`, carrying on from whatever is there already. Calls `progress` with the
+    /// bytes so far and the total as it goes.
+    pub async fn download(&self, id: &str, part: &std::path::Path, progress: impl Fn(u64, u64)) -> AppResult<()> {
+        use tokio::io::AsyncWriteExt;
+        let have = tokio::fs::metadata(part).await.map(|m| m.len()).unwrap_or(0);
+        let mut req = self.req(reqwest::Method::GET, &format!("/media/{id}")).timeout(Duration::from_secs(4 * 60 * 60));
+        if have > 0 {
+            req = req.header("Range", format!("bytes={have}-"));
         }
+        let mut res = req.send().await.map_err(|e| AppError::Offline(e.to_string()))?;
+        let (mut file, mut got, total) = match res.status() {
+            reqwest::StatusCode::PARTIAL_CONTENT => {
+                let file = tokio::fs::OpenOptions::new().append(true).open(part).await?;
+                (file, have, have + res.content_length().unwrap_or(0))
+            }
+            // Nothing left to fetch: the part file is the whole thing.
+            reqwest::StatusCode::RANGE_NOT_SATISFIABLE => return Ok(()),
+            s if s.is_success() => {
+                let file = tokio::fs::File::create(part).await?;
+                (file, 0, res.content_length().unwrap_or(0))
+            }
+            reqwest::StatusCode::UNAUTHORIZED => return Err(AppError::Revoked),
+            reqwest::StatusCode::NOT_FOUND => return Err(AppError::Hub("That picture is gone.".into())),
+            s => return Err(AppError::Offline(format!("download: {s}"))),
+        };
+        progress(got, total);
+        while let Some(chunk) = res.chunk().await.map_err(|e| AppError::Offline(e.to_string()))? {
+            file.write_all(&chunk).await?;
+            got += chunk.len() as u64;
+            progress(got, total);
+        }
+        file.flush().await?;
+        if total > 0 && got < total {
+            return Err(AppError::Offline("the download stopped early".into()));
+        }
+        Ok(())
     }
 
     pub async fn save_note(&self, note: &Note) -> AppResult<Note> {

@@ -1,46 +1,33 @@
-// Things shared into KitChat from another app (Android's Share button): a screenshot, a photo, a link. Asks which
-// chat it's for, then opens that chat with the pictures waiting to send, or sends the text straight away.
+// Things shared into KitChat from another app (Android's Share button): a screenshot, a photo, a video, a link. Asks
+// which chat it's for, then opens that chat with the photos and videos waiting to send, or sends the text straight
+// away.
 
 import { useCallback, useEffect, useState } from "react";
 import { api, errorText, isTauri } from "../lib/api";
-import type { SharedItem } from "../lib/types";
+import { type Attachment, fromItems } from "../lib/outgoing";
 import { Kit } from "./Kit";
 import { ShareToChat } from "./NoteEditor";
 import { toast } from "./ui";
 
 export interface Incoming {
-  images: Blob[];
+  media: Attachment[];
   text: string;
 }
 
-async function load(items: SharedItem[]): Promise<Incoming> {
-  const images: Blob[] = [];
-  const texts: string[] = [];
-  for (const item of items) {
-    if (item.kind === "image") {
-      try {
-        const bytes = await api.readShared(item.path);
-        images.push(new Blob([bytes], { type: item.mime || "image/jpeg" }));
-      } catch (e) {
-        void api.log("warn", `shared picture unreadable: ${errorText(e)}`);
-      }
-    } else if (item.text.trim()) {
-      texts.push(item.text.trim());
-    }
-  }
-  return { images, text: texts.join("\n") };
-}
-
 /** Watches for shares and, when one arrives, shows the chat picker. */
-export function ShareSheet({ onPicked }: { onPicked: (chatId: string, images: Blob[]) => void }) {
+export function ShareSheet({ onPicked }: { onPicked: (chatId: string, media: Attachment[]) => void }) {
   const [incoming, setIncoming] = useState<Incoming | null>(null);
 
   const check = useCallback(async () => {
     try {
-      const items = await api.takeShared();
-      if (items.length === 0) return;
-      const got = await load(items);
-      if (got.images.length || got.text) setIncoming(got);
+      const shared = await api.takeShared();
+      if (shared.problem) toast(shared.problem, "error");
+      const text = shared.items
+        .filter((i) => i.kind === "text" && i.text.trim())
+        .map((i) => i.text.trim())
+        .join("\n");
+      const got = { media: fromItems(shared.items), text };
+      if (got.media.length || got.text) setIncoming(got);
     } catch (e) {
       void api.log("warn", `take_shared: ${errorText(e)}`);
     }
@@ -68,17 +55,15 @@ export function ShareSheet({ onPicked }: { onPicked: (chatId: string, images: Bl
         await api.sendMessage(chatId, { kind: "text", text: got.text });
         toast("Sent! 🎉");
       }
-      onPicked(chatId, got.images);
+      onPicked(chatId, got.media);
     } catch (e) {
       toast(errorText(e), "error");
     }
   };
 
-  const what = incoming.images.length
-    ? incoming.images.length === 1
-      ? "this picture"
-      : `these ${incoming.images.length} pictures`
-    : "this";
+  const n = incoming.media.length;
+  const videos = incoming.media.every((m) => m.kind === "video");
+  const what = n === 0 ? "this" : n === 1 ? (videos ? "this video" : "this picture") : `these ${n}`;
 
   return (
     <ShareToChat

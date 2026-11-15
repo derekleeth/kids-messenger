@@ -13,6 +13,7 @@ import { ShareSheet } from "./components/ShareSheet";
 import { Toasts, toast } from "./components/ui";
 import { Welcome } from "./components/Welcome";
 import { api, errorText, onDelta } from "./lib/api";
+import type { Attachment } from "./lib/outgoing";
 import { applyDelta, otherMember, setState, unreadCount, useAppState } from "./lib/state";
 
 type Tab = "chats" | "lists" | "family";
@@ -117,7 +118,7 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("chats");
   const [chatId, setChatId] = useState<string | null>(null);
   const [noteId, setNoteId] = useState<string | null>(null);
-  const [pendingShare, setPendingShare] = useState<{ chatId: string; images: Blob[] } | null>(null);
+  const [pendingShare, setPendingShare] = useState<{ chatId: string; media: Attachment[] } | null>(null);
 
   // Signed out (or removed by a parent): forget what was open.
   useEffect(() => {
@@ -174,7 +175,7 @@ export default function App() {
         chatId={chatId}
         onBack={wide ? null : () => setChatId(null)}
         onOpenNote={openNote}
-        pendingShare={pendingShare?.chatId === chatId ? pendingShare.images : undefined}
+        pendingShare={pendingShare?.chatId === chatId ? pendingShare.media : undefined}
         clearPendingShare={clearPendingShare}
       />
     ) : tab === "lists" && noteId ? (
@@ -207,8 +208,8 @@ export default function App() {
 
   const share = (
     <ShareSheet
-      onPicked={(id, images) => {
-        if (images.length) setPendingShare({ chatId: id, images });
+      onPicked={(id, media) => {
+        if (media.length) setPendingShare({ chatId: id, media });
         openChat(id);
       }}
     />

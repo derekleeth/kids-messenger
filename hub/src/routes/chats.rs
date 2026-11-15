@@ -116,6 +116,15 @@ pub async fn history(
     Ok(Json(messages))
 }
 
+async fn check_media(conn: &mut SqliteConnection, id: &str, missing: &str) -> ApiResult<()> {
+    let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM media WHERE id = ?").bind(id).fetch_one(conn).await?;
+    if exists == 0 { Err(ApiError::bad(missing)) } else { Ok(()) }
+}
+
+fn clean_caption(caption: &str) -> String {
+    caption.trim().chars().take(500).collect()
+}
+
 /// Checks a message before it's stored, and fills in what the hub decides (a shared note's card).
 async fn prepare_body(conn: &mut SqliteConnection, authed: &Authed, body: MessageBody) -> ApiResult<MessageBody> {
     match body {
@@ -129,14 +138,34 @@ async fn prepare_body(conn: &mut SqliteConnection, authed: &Authed, body: Messag
             }
             Ok(MessageBody::Text { text })
         }
-        MessageBody::Image { media_id, width, height, caption } => {
-            let exists: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM media WHERE id = ?").bind(&media_id).fetch_one(conn).await?;
-            if exists == 0 {
-                return Err(ApiError::bad("That picture didn't finish uploading. Try again."));
+        MessageBody::Image { media_id, width, height, caption, full_media_id, full_bytes } => {
+            check_media(conn, &media_id, "That picture didn't finish uploading. Try again.").await?;
+            if let Some(full) = &full_media_id {
+                check_media(conn, full, "That photo didn't finish uploading. Try again.").await?;
             }
-            let caption: String = caption.trim().chars().take(500).collect();
-            Ok(MessageBody::Image { media_id, width: width.min(20_000), height: height.min(20_000), caption })
+            Ok(MessageBody::Image {
+                media_id,
+                width: width.min(20_000),
+                height: height.min(20_000),
+                caption: clean_caption(&caption),
+                full_media_id,
+                full_bytes,
+            })
+        }
+        MessageBody::Video { video_media_id, poster_media_id, width, height, duration_ms, bytes, caption } => {
+            check_media(conn, &video_media_id, "That video didn't finish uploading. Try again.").await?;
+            if let Some(poster) = &poster_media_id {
+                check_media(conn, poster, "That video didn't finish uploading. Try again.").await?;
+            }
+            Ok(MessageBody::Video {
+                video_media_id,
+                poster_media_id,
+                width: width.min(20_000),
+                height: height.min(20_000),
+                duration_ms,
+                bytes,
+                caption: clean_caption(&caption),
+            })
         }
         MessageBody::Sticker { sticker } => {
             if !STICKERS.contains(&sticker.as_str()) {
