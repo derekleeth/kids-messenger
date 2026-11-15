@@ -50,7 +50,7 @@ pub fn normalize_url(raw: &str) -> AppResult<String> {
 }
 
 /// A home-network address or name, or one inside a Tailscale network: no TLS needed there.
-fn looks_local(s: &str) -> bool {
+pub fn looks_local(s: &str) -> bool {
     let host = if s.starts_with('[') { s } else { s.split(['/', ':']).next().unwrap_or_default() };
     let host = host.trim_start_matches('[').split(']').next().unwrap_or_default().to_ascii_lowercase();
     if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {

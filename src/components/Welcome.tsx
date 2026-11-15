@@ -10,6 +10,14 @@ import { Button, Field, inputClass } from "./ui";
 
 type Mode = "start" | "join" | "setup";
 
+/** The app's "can't reach the hub" says messages will send later, which doesn't fit before joining. */
+function welcomeError(e: unknown): string {
+  const text = errorText(e);
+  return text.startsWith("Can't reach the family hub")
+    ? "Can't reach the family hub. Check the address, that the hub is running, and that this device is on your home Wi-Fi."
+    : text;
+}
+
 export function Welcome() {
   const [mode, setMode] = useState<Mode>("start");
   const why = useAppState((s) => s.status.detail);
@@ -71,7 +79,7 @@ function JoinForm({ deviceName, onBack }: { deviceName: string; onBack: () => vo
       const text = await api.scanQr();
       if (text && !takeLink(text)) setError("That QR code isn't a KitChat join code.");
     } catch (e) {
-      setError(errorText(e));
+      setError(welcomeError(e));
     }
   };
 
@@ -82,7 +90,7 @@ function JoinForm({ deviceName, onBack }: { deviceName: string; onBack: () => vo
       await api.hubHello(hub);
       await api.joinFamily({ url: hub, code, deviceName: device || "Tablet" });
     } catch (e) {
-      setError(errorText(e));
+      setError(welcomeError(e));
     } finally {
       setBusy(false);
     }
@@ -164,7 +172,7 @@ function SetupForm({ deviceName, onBack }: { deviceName: string; onBack: () => v
       }
       await api.setupFamily({ url: hub, setupCode, familyName, name, deviceName: device || deviceName || "Computer" });
     } catch (e) {
-      setError(errorText(e));
+      setError(welcomeError(e));
     } finally {
       setBusy(false);
     }

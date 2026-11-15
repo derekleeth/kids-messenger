@@ -10,7 +10,7 @@ use tauri::{AppHandle, State};
 
 use crate::engine::{Delta, Engine};
 use crate::error::{AppError, AppResult};
-use crate::hub::{HubClient, normalize_url};
+use crate::hub::{HubClient, looks_local, normalize_url};
 use crate::platform::{self, SharedItem};
 use crate::store::{OutboxEntry, PAGE, UiMessage, outbox_message};
 
@@ -25,13 +25,28 @@ pub async fn snapshot(engine: Eng<'_>) -> AppResult<Delta> {
     engine.snapshot().await
 }
 
+/// Android 17 blocks the home network until the person allows it; asked before the first contact with a hub there.
+async fn allow_home_network(app: &AppHandle, url: &str) -> AppResult<()> {
+    let host = url.split("://").nth(1).unwrap_or(url);
+    if looks_local(host) && !platform::local_network(app).await {
+        return Err(AppError::Invalid(
+            "KitChat needs permission to reach devices on your home network to find the family hub. Allow it in              Settings › Apps › KitChat › Permissions."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 #[tauri::command]
-pub async fn hub_hello(url: String) -> AppResult<Hello> {
+pub async fn hub_hello(app: AppHandle, url: String) -> AppResult<Hello> {
+    let url = normalize_url(&url)?;
+    allow_home_network(&app, &url).await?;
     HubClient::new(&url, None)?.hello().await
 }
 
 #[tauri::command]
 pub async fn setup_family(
+    app: AppHandle,
     engine: Eng<'_>,
     url: String,
     setup_code: String,
@@ -40,14 +55,22 @@ pub async fn setup_family(
     device_name: String,
 ) -> AppResult<()> {
     let url = normalize_url(&url)?;
+    allow_home_network(&app, &url).await?;
     let client = HubClient::new(&url, None)?;
     let enrolled = client.setup(&SetupRequest { setup_code, family_name, name, device_name }).await?;
     engine.enrolled(&url, enrolled).await
 }
 
 #[tauri::command]
-pub async fn join_family(engine: Eng<'_>, url: String, code: String, device_name: String) -> AppResult<()> {
+pub async fn join_family(
+    app: AppHandle,
+    engine: Eng<'_>,
+    url: String,
+    code: String,
+    device_name: String,
+) -> AppResult<()> {
     let url = normalize_url(&url)?;
+    allow_home_network(&app, &url).await?;
     let client = HubClient::new(&url, None)?;
     let enrolled = client.enroll(&EnrollRequest { code, device_name }).await?;
     engine.enrolled(&url, enrolled).await

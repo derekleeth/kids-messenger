@@ -27,6 +27,8 @@ import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import com.google.android.gms.common.api.ApiException
 import com.google.android.gms.common.api.CommonStatusCodes
+import com.google.android.gms.common.moduleinstall.ModuleInstall
+import com.google.android.gms.common.moduleinstall.ModuleInstallRequest
 import com.google.mlkit.common.MlKitException
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
@@ -58,6 +60,7 @@ class KeepAliveArgs {
  *   Also asks once for the notification and (Android 17+) local network permissions.
  * - `takeShared`: pictures and text shared in from other apps. Pictures are copied to `cache/shared/` (the Rust side
  *   reads them from `app_cache_dir()/shared` and deletes them).
+ * - `localNetwork`: Android 17's permission to reach the home network, asked before joining a hub there.
  * - `scan`: a join QR code, through Google's code scanner (no camera permission needed).
  */
 @TauriPlugin(
@@ -251,15 +254,43 @@ class KitPlugin(private val activity: Activity) : Plugin(activity) {
     }.start()
   }
 
+  /** `{ granted }`. Android 17 (API 37) blocks connections to 192.168.x.x and the like without it. */
+  @Command
+  fun localNetwork(invoke: Invoke) {
+    if (Build.VERSION.SDK_INT < 37 || getPermissionState(LOCAL_NETWORK) == PermissionState.GRANTED) {
+      invoke.resolve(JSObject().put("granted", true))
+    } else {
+      requestPermissionForAlias(LOCAL_NETWORK, invoke, "localNetworkAnswered")
+    }
+  }
+
+  @PermissionCallback
+  private fun localNetworkAnswered(invoke: Invoke) {
+    invoke.resolve(JSObject().put("granted", getPermissionState(LOCAL_NETWORK) == PermissionState.GRANTED))
+  }
+
   @Command
   fun scan(invoke: Invoke) {
     val options = GmsBarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build()
     val scanner = try {
       GmsBarcodeScanning.getClient(activity, options)
     } catch (e: Exception) {
-      invoke.reject("The QR scanner isn't available on this device. Type the code instead.")
+      Log.w(TAG, "scanner client", e)
+      invoke.reject("The QR scanner isn't available on this device (${e.javaClass.simpleName}). Type the code instead.")
       return
     }
+    // Google Play services downloads the scanner the first time an app needs it. Ask for it, then scan; if the
+    // request itself fails, try scanning anyway and let that report what's wrong.
+    val request = ModuleInstallRequest.newBuilder().addApi(scanner).build()
+    ModuleInstall.getClient(activity).installModules(request)
+      .addOnSuccessListener { startScan(scanner, invoke) }
+      .addOnFailureListener { e ->
+        Log.w(TAG, "scanner module install", e)
+        startScan(scanner, invoke)
+      }
+  }
+
+  private fun startScan(scanner: com.google.mlkit.vision.codescanner.GmsBarcodeScanner, invoke: Invoke) {
     val canceled = {
       val result = JSObject()
       result.put("canceled", true)
@@ -273,11 +304,18 @@ class KitPlugin(private val activity: Activity) : Plugin(activity) {
       }
       .addOnCanceledListener { canceled() }
       .addOnFailureListener { e ->
+        Log.w(TAG, "scan failed", e)
         // Back from the scanner fails it with ML Kit's INTERNAL error rather than cancelling (seen in TerminalLynx).
         val backedOut = (e is MlKitException &&
           (e.errorCode == MlKitException.CODE_SCANNER_CANCELLED || e.errorCode == MlKitException.INTERNAL)) ||
           (e is ApiException && e.statusCode == CommonStatusCodes.CANCELED)
-        if (backedOut) canceled() else invoke.reject("The QR scanner isn't available on this device. Type the code instead.")
+        val code = (e as? MlKitException)?.errorCode ?: (e as? ApiException)?.statusCode
+        when {
+          backedOut -> canceled()
+          e is MlKitException && e.errorCode == MlKitException.CODE_SCANNER_UNAVAILABLE ->
+            invoke.reject("The QR scanner is still being set up by Google Play services. Try again in a minute, or type the code.")
+          else -> invoke.reject("Couldn't open the QR scanner (error ${code ?: e.javaClass.simpleName}). Type the code instead.")
+        }
       }
   }
 }

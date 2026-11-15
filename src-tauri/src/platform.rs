@@ -76,6 +76,27 @@ pub fn keep_alive<R: Runtime>(app: &AppHandle<R>, on: bool) {
     let _ = (app, on);
 }
 
+/// Android 17+: asks for the permission to reach devices on the home network (a hub at 192.168.x.x), which Android
+/// otherwise blocks. Says whether it's allowed. Elsewhere, always allowed.
+pub async fn local_network<R: Runtime>(app: &AppHandle<R>) -> bool {
+    #[cfg(target_os = "android")]
+    if let Some(p) = plugin(app) {
+        #[derive(Deserialize)]
+        struct Answer {
+            granted: bool,
+        }
+        return match p.0.run_mobile_plugin_async::<Answer>("localNetwork", serde_json::json!({})).await {
+            Ok(a) => a.granted,
+            Err(e) => {
+                log::warn!("local network permission: {e}");
+                true
+            }
+        };
+    }
+    let _ = app;
+    true
+}
+
 /// What's been shared into the app since the last call (Android's share sheet).
 pub async fn take_shared<R: Runtime>(app: &AppHandle<R>) -> Vec<SharedItem> {
     #[cfg(target_os = "android")]
