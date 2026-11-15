@@ -60,8 +60,12 @@ android {
             // Without keystore.properties, this PC's Android debug key (~/.android/debug.keystore) signs it, so it
             // still installs; updates then have to be built on this same PC.
             signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
+            // No R8 shrinking: Google's code scanner reaches its internals by reflection and ships no keep rules, so a
+            // shrunk build fails at GmsBarcodeScanning.getClient with a NullPointerException. The APK is mostly the Rust
+            // library anyway.
+            isMinifyEnabled = false
             optimization {
-               enable = true
+               enable = false
             }
             proguardFiles(
                 *fileTree(".") {
