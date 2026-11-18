@@ -39,6 +39,8 @@ Same stack as TerminalLynx: Tauri 2, Rust (edition 2024), React 19, Vite, Tailwi
 ## Getting started
 
 - [docs/hub_setup.md](docs/hub_setup.md): run the hub and set up the family.
+- [docs/vps_setup.md](docs/vps_setup.md): run the hub on a Linux VPS behind nginx with your own domain, for messages
+  anywhere.
 - [docs/sideload.md](docs/sideload.md): build the Android APK and install it on the tablets.
 
 ## Developing

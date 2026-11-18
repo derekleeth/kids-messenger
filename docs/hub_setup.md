@@ -82,6 +82,12 @@ up: a minute of phone video is around 100-200 MB, so keep an eye on the drive it
 At home, the tablets talk to the hub over the home network. To also get messages on mobile data or at a friend's
 house, pick one:
 
+### Your own server (VPS)
+
+If you rent a Linux server and have a domain, the hub can live there instead of on the family PC, behind nginx with
+an `https://` address. That's a longer setup, so it has its own guide: [vps_setup.md](vps_setup.md). It also covers
+moving this PC's `hub-data` across without anyone re-joining.
+
 ### Tailscale (simplest, private)
 
 Install [Tailscale](https://tailscale.com) on the hub PC and on each phone or tablet, signed in to the same account.
