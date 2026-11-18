@@ -1,9 +1,11 @@
 //! Talking to the family hub: its REST API and the `/live` WebSocket.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 use kit_protocol::notes::Note;
+use kit_protocol::proof::{HubProof, ProveRequest, hub_proof, token_hash};
 use kit_protocol::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -14,11 +16,18 @@ use crate::error::{AppError, AppResult};
 
 pub type Live = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
+/// How many addresses a device keeps for its hub.
+pub const MAX_ADDRESSES: usize = 5;
+/// How long an address gets to prove it's the family's hub, so a dead one doesn't hold up the next.
+const PROVE_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Clone)]
 pub struct HubClient {
     base: String,
     token: Option<String>,
     http: reqwest::Client,
+    /// This device has more than one address for the hub, so it may try one that isn't the hub at all.
+    several_addresses: bool,
 }
 
 /// The hub's address as the person typed it, tidied: `192.168.1.20:8787` → `http://192.168.1.20:8787`.
@@ -69,6 +78,56 @@ pub fn looks_local(s: &str) -> bool {
         || !host.contains('.')
 }
 
+/// A list of hub addresses as typed or scanned: tidied, without repeats, in the same order.
+pub fn normalize_urls(raw: &[String]) -> AppResult<Vec<String>> {
+    let mut urls: Vec<String> = Vec::new();
+    for url in raw.iter().filter(|u| !u.trim().is_empty()) {
+        let url = normalize_url(url)?;
+        if !urls.contains(&url) {
+            urls.push(url);
+        }
+    }
+    if urls.is_empty() {
+        return Err(AppError::Invalid("Type the family hub's address.".into()));
+    }
+    if urls.len() > MAX_ADDRESSES {
+        return Err(AppError::Invalid(format!("KitChat can keep up to {MAX_ADDRESSES} hub addresses.")));
+    }
+    Ok(urls)
+}
+
+/// Plain http to anywhere but this computer: nothing shows who is really answering.
+fn is_unverified(base: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base) else { return true };
+    let host = url.host_str().unwrap_or_default().trim_start_matches('[').trim_end_matches(']');
+    let on_this_computer =
+        host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    url.scheme() == "http" && !on_this_computer
+}
+
+/// Tries the addresses in order and returns the first success. Being told this device was removed ends the search;
+/// any other failure moves on to the next address. If they all fail, a reason worth showing beats "unreachable".
+pub async fn first_working<T, F, Fut>(urls: &[String], mut attempt: F) -> AppResult<T>
+where
+    F: FnMut(String) -> Fut,
+    Fut: Future<Output = AppResult<T>>,
+{
+    let mut failure: Option<AppError> = None;
+    for url in urls {
+        match attempt(url.clone()).await {
+            Ok(value) => return Ok(value),
+            Err(AppError::Revoked) => return Err(AppError::Revoked),
+            Err(e) => {
+                log::info!("hub at {url}: {e}");
+                if failure.as_ref().is_none_or(|f| matches!(f, AppError::Offline(_))) {
+                    failure = Some(e);
+                }
+            }
+        }
+    }
+    Err(failure.unwrap_or_else(|| AppError::Offline("no hub address".into())))
+}
+
 impl HubClient {
     pub fn new(base: &str, token: Option<String>) -> AppResult<Self> {
         let http = reqwest::Client::builder()
@@ -77,16 +136,60 @@ impl HubClient {
             .user_agent(concat!("KitChat/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| AppError::Other(format!("http client: {e}")))?;
-        Ok(Self { base: normalize_url(base)?, token, http })
+        Ok(Self { base: normalize_url(base)?, token, http, several_addresses: false })
     }
 
     pub fn base(&self) -> &str {
         &self.base
     }
 
-    /// The same device, talking to the hub at another address (it moved, say from home to a server).
+    /// Says whether this device has more than one address for its hub.
+    pub fn with_several_addresses(mut self, several: bool) -> Self {
+        self.several_addresses = several;
+        self
+    }
+
+    /// The same device, talking to the hub at another address.
     pub fn at(&self, base: &str) -> AppResult<Self> {
-        Self::new(base, self.token.clone())
+        Ok(Self::new(base, self.token.clone())?.with_several_addresses(self.several_addresses))
+    }
+
+    /// Whether this address has to [`prove`](Self::prove) itself before it's sent the token or believed.
+    pub fn needs_proof(&self) -> bool {
+        self.several_addresses && is_unverified(&self.base)
+    }
+
+    /// Checks this address is the family's hub, without giving anything away: see [`kit_protocol::proof`]. The token
+    /// isn't sent, and nothing answered here can sign this device out.
+    pub async fn prove(&self, device_id: &str) -> AppResult<()> {
+        let token = self.token.as_deref().ok_or(AppError::NotEnrolled)?;
+        let mut random = [0u8; 32];
+        getrandom::fill(&mut random).map_err(|e| AppError::Other(format!("random: {e}")))?;
+        let nonce = proof::hex(&random);
+        let request = ProveRequest { device_id: device_id.to_string(), nonce: nonce.clone() };
+        let res = self
+            .http
+            .post(format!("{}/prove", self.base))
+            .timeout(PROVE_TIMEOUT)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| AppError::Offline(e.to_string()))?;
+        let status = res.status();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+            return Err(AppError::Offline(format!("prove: {status}")));
+        }
+        let not_ours = || {
+            AppError::Hub(format!(
+                "{} didn't confirm it's your family's hub. If it is, make sure the hub is up to date.",
+                self.base
+            ))
+        };
+        if !status.is_success() {
+            return Err(not_ours());
+        }
+        let answer: HubProof = res.json().await.map_err(|_| not_ours())?;
+        if answer.proof == hub_proof(&token_hash(token), device_id, &nonce) { Ok(()) } else { Err(not_ours()) }
     }
 
     fn req(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
@@ -202,7 +305,8 @@ impl HubClient {
     }
 
     pub async fn finish_upload(&self, id: &str) -> AppResult<String> {
-        let req = self.req(reqwest::Method::POST, &format!("/media/uploads/{id}/finish")).timeout(Duration::from_secs(300));
+        let req =
+            self.req(reqwest::Method::POST, &format!("/media/uploads/{id}/finish")).timeout(Duration::from_secs(300));
         let uploaded: Uploaded = self.send(req).await?;
         Ok(uploaded.media_id)
     }
@@ -309,6 +413,11 @@ fn tls_connector() -> Connector {
 mod tests {
     use super::*;
 
+    /// The app installs this at startup (lib.rs); reqwest needs it to make a client.
+    fn install_crypto() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
     #[test]
     fn addresses_are_tidied() {
         assert_eq!(normalize_url("192.168.1.20:8787/").unwrap(), "http://192.168.1.20:8787");
@@ -322,5 +431,139 @@ mod tests {
         assert!(normalize_url("http://kitchat.example.com").is_err());
         assert!(normalize_url("http://203.0.113.9").is_err());
         assert_eq!(normalize_url("http://[fd00::1]:8787").unwrap(), "http://[fd00::1]:8787");
+    }
+
+    #[test]
+    fn address_lists_are_tidied() {
+        let raw = ["100.101.102.103:8787", " ", "http://100.101.102.103:8787/", "192.168.1.20:8787"].map(String::from);
+        assert_eq!(normalize_urls(&raw).unwrap(), ["http://100.101.102.103:8787", "http://192.168.1.20:8787"]);
+        assert!(normalize_urls(&[" ".to_string()]).is_err());
+        let many: Vec<String> = (0..=MAX_ADDRESSES).map(|i| format!("192.168.1.{i}:8787")).collect();
+        assert!(normalize_urls(&many).is_err());
+    }
+
+    #[test]
+    fn only_unencrypted_addresses_elsewhere_need_proof_and_only_with_several() {
+        install_crypto();
+        let client = |url: &str, several| HubClient::new(url, None).unwrap().with_several_addresses(several);
+        assert!(client("192.168.1.20:8787", true).needs_proof());
+        assert!(client("100.101.102.103:8787", true).needs_proof());
+        assert!(client("family-pc:8787", true).needs_proof());
+        assert!(!client("192.168.1.20:8787", false).needs_proof());
+        assert!(!client("https://chat.example.com", true).needs_proof());
+        assert!(!client("localhost:8787", true).needs_proof());
+        assert!(!client("127.0.0.1:8787", true).needs_proof());
+        assert!(
+            client("192.168.1.20:8787", false).with_several_addresses(true).at("10.0.0.2:8787").unwrap().needs_proof()
+        );
+    }
+
+    fn urls() -> Vec<String> {
+        vec!["a".to_string(), "b".to_string(), "c".to_string()]
+    }
+
+    #[tokio::test]
+    async fn failover_uses_the_first_address_that_works() {
+        let mut tried = Vec::new();
+        let found = first_working(&urls(), |url| {
+            tried.push(url.clone());
+            async move { if url == "b" { Ok(url) } else { Err(AppError::Offline("down".into())) } }
+        })
+        .await;
+        assert_eq!(found.unwrap(), "b");
+        assert_eq!(tried, ["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn failover_stops_when_the_device_was_removed() {
+        let mut tried = 0;
+        let found: AppResult<()> = first_working(&urls(), |_| {
+            tried += 1;
+            async { Err(AppError::Revoked) }
+        })
+        .await;
+        assert!(matches!(found, Err(AppError::Revoked)));
+        assert_eq!(tried, 1);
+    }
+
+    #[tokio::test]
+    async fn failover_reports_the_most_useful_failure() {
+        let found: AppResult<()> = first_working(&urls(), |url| async move {
+            Err(if url == "b" { AppError::Hub("update the hub".into()) } else { AppError::Offline("down".into()) })
+        })
+        .await;
+        assert!(matches!(found, Err(AppError::Hub(m)) if m == "update the hub"));
+    }
+
+    /// Answers one request with `status` and `body`, and hands back what was asked.
+    async fn answer_once(
+        status: &'static str,
+        body: impl FnOnce(&str) -> String + Send + 'static,
+    ) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let served = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = socket.read(&mut buf).await.unwrap();
+                request.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some((head, rest)) = text.split_once("\r\n\r\n") {
+                    let length = head
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().to_string())
+                        })
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if rest.len() >= length {
+                        break;
+                    }
+                }
+            }
+            let text = String::from_utf8_lossy(&request).into_owned();
+            let content = body(text.split_once("\r\n\r\n").unwrap().1);
+            let reply = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{content}",
+                content.len()
+            );
+            socket.write_all(reply.as_bytes()).await.unwrap();
+            text
+        });
+        (url, served)
+    }
+
+    fn client_at(url: &str) -> HubClient {
+        install_crypto();
+        HubClient::new(url, Some("secret-token".into())).unwrap().with_several_addresses(true)
+    }
+
+    #[tokio::test]
+    async fn the_real_hub_passes_and_the_token_stays_home() {
+        let (url, served) = answer_once("200 OK", |body| {
+            let request: ProveRequest = serde_json::from_str(body).unwrap();
+            let proof = hub_proof(&token_hash("secret-token"), &request.device_id, &request.nonce);
+            serde_json::to_string(&HubProof { proof }).unwrap()
+        })
+        .await;
+        client_at(&url).prove("device").await.unwrap();
+        let request = served.await.unwrap();
+        assert!(!request.contains("secret-token"));
+        assert!(!request.to_ascii_lowercase().contains("authorization"));
+    }
+
+    #[tokio::test]
+    async fn a_wrong_answer_is_refused() {
+        let (url, _served) = answer_once("200 OK", |_| r#"{"proof":"00"}"#.to_string()).await;
+        assert!(matches!(client_at(&url).prove("device").await, Err(AppError::Hub(_))));
+    }
+
+    #[tokio::test]
+    async fn a_stranger_saying_unauthorized_cannot_sign_the_device_out() {
+        let (url, _served) = answer_once("401 Unauthorized", |_| "{}".to_string()).await;
+        assert!(matches!(client_at(&url).prove("device").await, Err(AppError::Hub(_))));
     }
 }

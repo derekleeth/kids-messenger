@@ -5,12 +5,13 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
+use kit_protocol::proof::{HubProof, ProveRequest, hub_proof};
 use kit_protocol::{EnrollRequest, Enrolled, Hello, PROTOCOL_VERSION, Role, SetupRequest};
 use sqlx::SqliteConnection;
 
 use super::{check_id, clean_name};
 use crate::error::{ApiError, ApiResult};
-use crate::limits::ClientIp;
+use crate::limits::{ClientIp, is_home_or_tailnet};
 use crate::{Hub, db, now_ms, random};
 
 pub async fn hello(State(hub): State<Arc<Hub>>) -> ApiResult<Json<Hello>> {
@@ -21,6 +22,31 @@ pub async fn hello(State(hub): State<Arc<Hub>>) -> ApiResult<Json<Hello>> {
         needs_setup: name.is_none(),
         family_name: name.unwrap_or_default(),
     }))
+}
+
+/// Shows a device on an unencrypted address that this is its family's hub ([`kit_protocol::proof`]). A removed device
+/// gets its answer too, so it can trust this hub when it says the device was removed.
+///
+/// Only for devices on the home network or Tailscale, the only places an unencrypted address is used. Otherwise a
+/// stranger's machine could pass a device's question on to a hub with a public address and get the right answer.
+pub async fn prove(
+    State(hub): State<Arc<Hub>>,
+    ClientIp(ip): ClientIp,
+    Json(req): Json<ProveRequest>,
+) -> ApiResult<Json<HubProof>> {
+    if !is_home_or_tailnet(ip) {
+        return Err(ApiError::Forbidden("This only works from the home network or Tailscale.".into()));
+    }
+    check_id(&req.device_id)?;
+    if !(32..=128).contains(&req.nonce.len()) {
+        return Err(ApiError::bad("That nonce isn't valid."));
+    }
+    let token_hash: Option<String> = sqlx::query_scalar("SELECT token_hash FROM devices WHERE id = ?")
+        .bind(&req.device_id)
+        .fetch_optional(&hub.pool)
+        .await?;
+    let token_hash = token_hash.ok_or_else(|| ApiError::NotFound("This hub doesn't know that device.".into()))?;
+    Ok(Json(HubProof { proof: hub_proof(&token_hash, &req.device_id, &req.nonce) }))
 }
 
 /// Adds a device for `member_id` and returns its new token.

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 pub mod links;
 pub mod media;
 pub mod notes;
+pub mod proof;
 
 /// The protocol version the hub reports in `/hello`; an app refuses a hub with a different major version.
 pub const PROTOCOL_VERSION: u32 = 1;

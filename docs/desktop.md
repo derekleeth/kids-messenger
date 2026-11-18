@@ -42,8 +42,8 @@ The link icon at the top right of a chat opens everything sent in it that's wort
 The search box finds words in the link, its title or the message it came with. It covers the messages this device
 has; scroll further back in the chat to bring in older ones.
 
-## The hub moved
+## Hub addresses
 
-If the family hub moves (for example from the home PC to a server, see [vps_setup.md](vps_setup.md)), each device
-can follow it without joining again: **Family › This device › Family hub › Change**. KitChat checks that the hub at
-the new address knows this device before it switches.
+**Family › This device › Family hub › Change** holds the addresses KitChat tries for the family hub, from the top. Use
+it if the hub moves (for example from the home PC to a server, see [vps_setup.md](vps_setup.md)), or to add a second
+address ([hub_setup.md](hub_setup.md#tailscale-with-the-home-network-as-backup)). The device stays signed in.

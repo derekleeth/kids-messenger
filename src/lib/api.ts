@@ -6,6 +6,7 @@ import type {
   Delta,
   Device,
   Hello,
+  HubAddresses,
   Incoming,
   JoinCode,
   Member,
@@ -65,7 +66,8 @@ export const api = {
   hubHello: (url: string) => call<Hello>("hub_hello", { url }),
   setupFamily: (a: { url: string; setupCode: string; familyName: string; name: string; deviceName: string }) =>
     call<void>("setup_family", a),
-  joinFamily: (a: { url: string; code: string; deviceName: string }) => call<void>("join_family", a),
+  joinFamily: (a: { url: string; alsoUrls: string[]; code: string; deviceName: string }) =>
+    call<void>("join_family", a),
   signOut: () => call<void>("sign_out"),
   sendMessage: (chatId: string, body: MessageBody) => call<Message>("send_message", { chatId, body }),
   /** Saves bytes the page has (a shrunk picture, a file picked on desktop) for `sendMedia`; returns the path. */
@@ -103,8 +105,8 @@ export const api = {
   setAutostart: (on: boolean) => call<boolean>("set_autostart", { on }),
   /** Links and shared lists in a chat, newest first (older than `before`, when given). */
   chatShelf: (chatId: string, before?: string) => call<Message[]>("chat_shelf", { chatId, before: before ?? null }),
-  /** The family's hub moved: checks this device is known there, then uses the new address. */
-  changeHub: (url: string) => call<string>("change_hub", { url }),
+  /** The addresses to try for the family's hub, in order. At least one has to work now. */
+  setHubAddresses: (urls: string[]) => call<HubAddresses>("set_hub_addresses", { urls }),
 };
 
 /** The desktop app (Windows, macOS, Linux), where KitChat sits in the tray and can start with the computer. */

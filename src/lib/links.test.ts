@@ -37,8 +37,14 @@ describe("links", () => {
   it("reads a join link from a QR code", () => {
     expect(parseJoinLink("kitchat://join?hub=http%3A%2F%2F192.168.1.20%3A8787&code=K7P3QX")).toEqual({
       hub: "http://192.168.1.20:8787",
+      also: [],
       code: "K7P3QX",
     });
+    expect(
+      parseJoinLink(
+        "kitchat://join?hub=http%3A%2F%2F100.1.2.3%3A8787&also=http%3A%2F%2F192.168.1.20%3A8787&code=K7P3QX",
+      ),
+    ).toEqual({ hub: "http://100.1.2.3:8787", also: ["http://192.168.1.20:8787"], code: "K7P3QX" });
     expect(parseJoinLink("https://evil.example/?hub=x&code=y")).toBeNull();
     expect(parseJoinLink("kitchat://join?hub=x")).toBeNull();
   });

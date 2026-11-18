@@ -108,6 +108,27 @@ Install [Tailscale](https://tailscale.com) on the hub PC and on each phone or ta
 Use the PC's Tailscale address as the hub address, for example `100.101.102.103:8787` or `family-pc:8787` with
 MagicDNS. Only your own devices can reach the hub. Each device needs the Tailscale app running.
 
+### Tailscale, with the home network as backup
+
+A device can keep several addresses for the hub. It tries them from the top and stays on the first that works until
+that connection drops. With the Tailscale address first and the home address second, the family can still chat at home
+when the internet is down, as long as the hub PC and the Wi-Fi are on. Away from home it still takes the hub PC, its
+internet connection and Tailscale.
+
+1. Update the hub first: a device won't use several addresses with an older hub.
+2. The hub already listens on all of the PC's networks, unless you changed `--bind`. Give the PC a fixed home address
+   (a DHCP reservation on your router), so the saved one keeps working.
+3. On each device, open **Family › This device › Family hub › Change**. Put the Tailscale address first (for example
+   `100.101.102.103:8787`), tap **Add another address**, and add the home one (for example `192.168.1.20:8787`).
+
+At least one address has to work when you save. One that can't be reached from where you are is kept, and KitChat says
+so. A join code made on a device with several addresses carries them all when it's scanned, so new devices get the
+list. Typing a code by hand gives the new device just the address you typed.
+
+Home and Tailscale addresses are plain `http`, and the same home address can belong to a stranger's device on another
+network. So a device with several addresses first asks the hub to prove it's yours, and sends its sign-in token only
+to a hub that can. The hub answers that only for devices on the home network or Tailscale.
+
 ### Cloudflare Tunnel (no app on the tablets)
 
 Gives the hub an `https://` address on the internet without opening a port on your router. You need a domain on

@@ -19,6 +19,7 @@ pub fn router() -> Router<Arc<Hub>> {
         .route("/hello", get(setup::hello))
         .route("/setup", post(setup::setup))
         .route("/enroll", post(setup::enroll))
+        .route("/prove", post(setup::prove))
         .route("/sync", get(sync::sync))
         .route("/live", get(live::handler))
         .route("/members", get(members::list).post(members::create))

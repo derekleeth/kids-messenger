@@ -107,7 +107,10 @@ export interface Note {
 }
 
 export interface Account {
+  /** The address in use, or last used. */
   hubUrl: string;
+  /** Every address for the hub, in the order they're tried. */
+  hubUrls: string[];
   deviceId: string;
   me: Member;
   familyName: string;
@@ -143,8 +146,15 @@ export interface JoinCode {
   code: string;
   expiresAt: number;
   hubUrl: string;
+  hubUrls: string[];
   link: string;
   qrSvg: string;
+}
+
+export interface HubAddresses {
+  urls: string[];
+  /** Saved, but couldn't be reached from here just now. */
+  unreachable: string[];
 }
 
 /** A photo or video ready to send (copied into the app's cache, with a small preview), or text shared in. */

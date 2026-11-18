@@ -1,6 +1,6 @@
 // The family: me (name, look, theme), everyone else, and for parents, adding people and devices.
 
-import { LogOut, Moon, Plus, Power, QrCode, Server, Smartphone, Sun, Trash2 } from "lucide-react";
+import { ArrowUp, LogOut, Moon, Plus, Power, QrCode, Server, Smartphone, Sun, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, errorText, isDesktopApp } from "../lib/api";
 import { ago } from "../lib/format";
@@ -189,7 +189,12 @@ function JoinCodeSheet({ member, onClose }: { member: Member; onClose: () => voi
           />
           <div className="font-mono text-4xl font-black tracking-[0.3em]">{code.code}</div>
           <div className="text-sm text-ink-soft">
-            Hub: <span className="font-mono">{code.hubUrl}</span>
+            Hub:{" "}
+            {code.hubUrls.map((url) => (
+              <span key={url} className="block font-mono break-all">
+                {url}
+              </span>
+            ))}
           </div>
           <div className="text-sm font-bold text-ink-soft">
             <Countdown until={code.expiresAt} />
@@ -256,15 +261,31 @@ function Devices({ members }: { members: Member[] }) {
   );
 }
 
-/** The family's hub moved (say from the home PC to a server): point this device at its new address. */
-function ChangeHub({ current, onClose }: { current: string; onClose: () => void }) {
-  const [url, setUrl] = useState(current);
+const MAX_HUB_ADDRESSES = 5;
+
+/** The addresses this device tries for the family's hub, in order: say Tailscale first, then the home network. */
+function HubAddressesSheet({ current, inUse, onClose }: { current: string[]; inUse: string; onClose: () => void }) {
+  const [urls, setUrls] = useState(current);
   const [busy, setBusy] = useState(false);
+  const filled = urls.map((url) => url.trim()).filter(Boolean);
+  const changed = filled.join("\n") !== current.join("\n");
+
+  const setUrl = (index: number, url: string) => setUrls(urls.map((u, i) => (i === index ? url : u)));
+  const moveUp = (index: number) => {
+    const next = [...urls];
+    [next[index - 1], next[index]] = [next[index], next[index - 1]];
+    setUrls(next);
+  };
+
   const save = async () => {
     setBusy(true);
     try {
-      const now = await api.changeHub(url);
-      toast(`Now using the hub at ${now}`);
+      const saved = await api.setHubAddresses(filled);
+      toast(
+        saved.unreachable.length > 0
+          ? `Saved. Couldn't reach ${saved.unreachable.join(", ")} from here right now.`
+          : "Hub addresses saved",
+      );
       onClose();
     } catch (e) {
       toast(errorText(e), "error");
@@ -272,25 +293,59 @@ function ChangeHub({ current, onClose }: { current: string; onClose: () => void 
       setBusy(false);
     }
   };
+
   return (
-    <Sheet title="Family hub address" onClose={onClose}>
+    <Sheet title="Family hub addresses" onClose={onClose}>
       <div className="flex flex-col gap-4">
         <p className="text-ink-soft">
-          Only change this if the family hub moved, for example to a server so it works away from home. This device
-          stays signed in: KitChat checks the hub there knows it before switching.
+          KitChat tries these from the top and uses the first that works, so the family can keep chatting at home when
+          the internet is down. This device stays signed in.
         </p>
-        <Field label="Hub address" hint="For example chat.example.com, or 192.168.1.20:8787 at home.">
-          <input
-            className={`${inputClass} font-mono`}
-            value={url}
-            autoFocus
-            spellCheck={false}
-            onChange={(e) => setUrl(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && !busy && void save()}
-          />
-        </Field>
-        <Button big disabled={busy || !url.trim() || url.trim() === current} onClick={() => void save()}>
-          {busy ? "Checking…" : "Use this address"}
+        <div className="flex flex-col gap-2">
+          {urls.map((url, i) => (
+            <div key={i} className="flex items-center gap-1">
+              <input
+                aria-label={`Hub address ${i + 1}`}
+                className={`${inputClass} min-w-0 flex-1 px-3! font-mono text-[13px]!`}
+                value={url}
+                spellCheck={false}
+                autoCapitalize="off"
+                autoCorrect="off"
+                inputMode="url"
+                placeholder={i === 0 ? "100.101.102.103:8787" : "192.168.1.20:8787"}
+                onChange={(e) => setUrl(i, e.target.value)}
+              />
+              <button
+                type="button"
+                aria-label={`Try address ${i + 1} sooner`}
+                disabled={i === 0}
+                onClick={() => moveUp(i)}
+                className="grid size-10 shrink-0 place-items-center rounded-full hover:bg-brand-soft disabled:opacity-30"
+              >
+                <ArrowUp size={20} />
+              </button>
+              <button
+                type="button"
+                aria-label={`Remove address ${i + 1}`}
+                disabled={urls.length === 1}
+                onClick={() => setUrls(urls.filter((_, j) => j !== i))}
+                className="grid size-10 shrink-0 place-items-center rounded-full text-danger hover:bg-surface-2 disabled:opacity-30"
+              >
+                <X size={20} />
+              </button>
+            </div>
+          ))}
+        </div>
+        <p className="text-sm break-all text-ink-soft">
+          In use now: <span className="font-mono">{inUse}</span>
+        </p>
+        {urls.length < MAX_HUB_ADDRESSES && (
+          <Button tone="soft" onClick={() => setUrls([...urls, ""])}>
+            <Plus /> Add another address
+          </Button>
+        )}
+        <Button big disabled={busy || filled.length === 0 || !changed} onClick={() => void save()}>
+          {busy ? "Checking…" : "Save addresses"}
         </Button>
       </div>
     </Sheet>
@@ -436,6 +491,9 @@ export function FamilyView({ onOpenPerson }: { onOpenPerson: (memberId: string) 
             <div className="min-w-0 flex-1">
               <div className="font-extrabold">Family hub</div>
               <div className="truncate font-mono text-sm text-ink-soft">{account.hubUrl}</div>
+              {account.hubUrls.length > 1 && (
+                <div className="text-sm text-ink-soft">{account.hubUrls.length} addresses, tried in order</div>
+              )}
             </div>
             <Button tone="soft" onClick={() => setChangingHub(true)}>
               Change
@@ -460,7 +518,9 @@ export function FamilyView({ onOpenPerson }: { onOpenPerson: (memberId: string) 
         />
       )}
       {codeFor && <JoinCodeSheet member={codeFor} onClose={() => setCodeFor(null)} />}
-      {changingHub && <ChangeHub current={account.hubUrl} onClose={() => setChangingHub(false)} />}
+      {changingHub && (
+        <HubAddressesSheet current={account.hubUrls} inUse={account.hubUrl} onClose={() => setChangingHub(false)} />
+      )}
     </div>
   );
 }

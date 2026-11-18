@@ -2,7 +2,7 @@
 //! proxy), how often they may ask, how long a request may take, and the security headers on every answer.
 //!
 //! The limits are generous for a family's few devices and tight for anyone guessing codes or tokens:
-//! - `/hello`, `/setup` and `/enroll`: 10 a minute per address, 5 at once.
+//! - `/hello`, `/setup`, `/enroll` and `/prove`: 10 a minute per address, 5 at once.
 //! - Wrong or missing device tokens: 20 per address in 10 minutes, then that address is refused for 15 minutes.
 //! - Everything else: 20 a second per device (100 at once) and 40 a second per address.
 //! - Wrong codes: 5 per address in 10 minutes, on top of the hub-wide [`crate::auth::CodeGuard`].
@@ -88,6 +88,19 @@ pub fn client_ip(peer: Option<SocketAddr>, headers: &HeaderMap, trust_proxy: boo
     let forwarded: Vec<String> =
         headers.get_all("x-forwarded-for").iter().filter_map(|v| v.to_str().ok()).map(str::to_owned).collect();
     forwarded.iter().flat_map(|v| v.split(',')).next_back().and_then(|v| v.trim().parse().ok()).unwrap_or(peer_ip)
+}
+
+/// A device on the home network or inside Tailscale. Not this computer: behind a proxy or tunnel that's where every
+/// request from the internet seems to come from.
+pub fn is_home_or_tailnet(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let [a, b, ..] = ip.octets();
+            // 100.64.0.0/10: Tailscale's range.
+            ip.is_private() || ip.is_link_local() || (a == 100 && (64..128).contains(&b))
+        }
+        IpAddr::V6(ip) => ip.is_unique_local() || ip.is_unicast_link_local(),
+    }
 }
 
 /// Token buckets, one per key, behind a plain mutex: a family hub sees a handful of keys.
@@ -285,7 +298,7 @@ fn too_many(wait: Duration) -> Response {
 
 /// Paths anyone may call without a device token.
 fn is_open_path(path: &str) -> bool {
-    matches!(path, "/hello" | "/setup" | "/enroll")
+    matches!(path, "/hello" | "/setup" | "/enroll" | "/prove")
 }
 
 /// Paths that may take longer than [`REQUEST_TIMEOUT`]: the live socket and pictures and videos going up or down.
@@ -380,6 +393,18 @@ mod tests {
         assert_eq!(client_ip(peer("127.0.0.1:5000"), &h, true), "3.3.3.3".parse::<IpAddr>().unwrap());
         let h = headers(&[("x-real-ip", "junk")]);
         assert_eq!(client_ip(peer("127.0.0.1:5000"), &h, true), "127.0.0.1".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn home_and_tailscale_addresses_are_told_apart_from_the_rest() {
+        for ip in
+            ["192.168.1.20", "10.0.0.5", "172.16.0.1", "169.254.1.1", "100.101.102.103", "fd7a:115c:a1e0::1", "fe80::1"]
+        {
+            assert!(is_home_or_tailnet(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["8.8.8.8", "100.128.0.1", "127.0.0.1", "::1", "0.0.0.0", "2001:4860:4860::8888"] {
+            assert!(!is_home_or_tailnet(ip.parse().unwrap()), "{ip}");
+        }
     }
 
     #[test]

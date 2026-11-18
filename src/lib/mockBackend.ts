@@ -42,6 +42,7 @@ let account: Account | null = params.has("welcome")
   ? null
   : {
       hubUrl: "http://192.168.1.20:8787",
+      hubUrls: ["http://100.101.102.103:8787", "http://192.168.1.20:8787"],
       deviceId: "D-1",
       me: members.find((m) => m.id === meId)!,
       familyName: "The Lynx Family",
@@ -342,6 +343,7 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
         throw "That code didn't work. Codes work once, for 10 minutes: ask a parent for a new one.";
       account = {
         hubUrl: String(a.url),
+        hubUrls: [String(a.url), ...((a.alsoUrls as string[] | undefined) ?? [])],
         deviceId: "D-NEW",
         me: members.find((m) => m.id === meId)!,
         familyName: "The Lynx Family",
@@ -502,7 +504,8 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
       return {
         code: "K7P3QX",
         expiresAt: Date.now() + 10 * 60_000,
-        hubUrl: account?.hubUrl ?? "",
+        hubUrl: account?.hubUrls[0] ?? "",
+        hubUrls: account?.hubUrls ?? [],
         link: "kitchat://join?hub=http%3A%2F%2F192.168.1.20%3A8787&code=K7P3QX",
         qrSvg: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 21 21" width="240" height="240"><rect width="21" height="21" fill="#fff"/><path d="M1 1h7v7H1zM13 1h7v7h-7zM1 13h7v7H1z" fill="none" stroke="#1f1147" stroke-width="1"/><path d="M3 3h3v3H3zM15 3h3v3h-3zM3 15h3v3H3zM10 2h1v2h-1zM10 10h2v1h-2zM14 12h2v2h-2zM12 16h1v3h-1zM17 15h2v1h-2z" fill="#1f1147"/></svg>`,
       } as T;
@@ -532,14 +535,16 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
       const from = a.before ? all.findIndex((m) => m.id === a.before) + 1 : 0;
       return all.slice(from, from + 100) as T;
     }
-    case "change_hub": {
+    case "set_hub_addresses": {
       await wait(400);
-      const url = String(a.url).trim();
-      if (!url) throw "Type the family hub's address.";
-      const hubUrl = /^https?:\/\//.test(url) ? url : `https://${url}`;
-      account = { ...account!, hubUrl };
+      const urls = (a.urls as string[])
+        .map((url) => url.trim())
+        .filter(Boolean)
+        .map((url) => (/^https?:\/\//.test(url) ? url : `http://${url}`));
+      if (!urls.length) throw "Type the family hub's address.";
+      account = { ...account!, hubUrl: urls[0], hubUrls: urls };
       emit({ account });
-      return hubUrl as T;
+      return { urls, unreachable: [] } as T;
     }
     default:
       throw `mock backend: no ${cmd}`;

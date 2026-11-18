@@ -9,6 +9,7 @@ use axum::extract::ConnectInfo;
 use axum::http::{HeaderMap, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use kit_protocol::notes::{Block, BlockKind, Note};
+use kit_protocol::proof;
 use kit_protocol::*;
 use kitchat_hub::limits::Config;
 use kitchat_hub::{Hub, app, open_in_memory, open_in_memory_with};
@@ -633,4 +634,51 @@ async fn notes_are_private_until_shared_as_a_family_list() {
     assert_eq!(call(&f.app, "DELETE", &path, Some(&f.kid), None).await.0, StatusCode::OK);
     let (status, _) = call(&f.app, "PUT", &path, Some(&f.kid), Some(serde_json::to_value(&note).unwrap())).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+async fn prove_from(app: &Router, peer: &str, device_id: &str, nonce: &str) -> (StatusCode, Value) {
+    let peer: std::net::SocketAddr = peer.parse().unwrap();
+    let body = json!({ "deviceId": device_id, "nonce": nonce }).to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/prove")
+        .extension(ConnectInfo(peer))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn the_hub_proves_itself_to_its_own_devices_nearby() {
+    let f = family().await;
+    let (_, devices) = call(&f.app, "GET", "/devices", Some(&f.parent), None).await;
+    let devices: Vec<Device> = serde_json::from_value(devices).unwrap();
+    let kid = devices.iter().find(|d| d.member_id == f.kid_member.id).unwrap();
+    let nonce = "ab".repeat(32);
+    let expected = proof::hub_proof(&proof::token_hash(&f.kid), &kid.id, &nonce);
+
+    for peer in ["192.168.1.30:5000", "100.101.102.103:5000"] {
+        let (status, body) = prove_from(&f.app, peer, &kid.id, &nonce).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["proof"], expected.as_str());
+    }
+
+    // From the internet, or through a proxy on this computer, it won't answer.
+    assert_eq!(prove_from(&f.app, "8.8.8.8:5000", &kid.id, &nonce).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(prove_from(&f.app, "127.0.0.1:5000", &kid.id, &nonce).await.0, StatusCode::FORBIDDEN);
+
+    let peer = "192.168.1.31:5000";
+    assert_eq!(prove_from(&f.app, peer, &ulid(), &nonce).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(prove_from(&f.app, peer, &kid.id, "short").await.0, StatusCode::BAD_REQUEST);
+
+    // A removed device can still tell it's talking to the hub that removed it.
+    let path = format!("/devices/{}", kid.id);
+    assert_eq!(call(&f.app, "DELETE", &path, Some(&f.parent), None).await.0, StatusCode::OK);
+    let (status, body) = prove_from(&f.app, peer, &kid.id, &nonce).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["proof"], expected.as_str());
 }

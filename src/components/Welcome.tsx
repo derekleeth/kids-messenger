@@ -57,6 +57,8 @@ export function Welcome() {
 
 function JoinForm({ deviceName, onBack }: { deviceName: string; onBack: () => void }) {
   const [hub, setHub] = useState("");
+  // Further hub addresses from a parent's QR code.
+  const [also, setAlso] = useState<string[]>([]);
   const [code, setCode] = useState("");
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
@@ -67,6 +69,7 @@ function JoinForm({ deviceName, onBack }: { deviceName: string; onBack: () => vo
     const link = parseJoinLink(text);
     if (link) {
       setHub(link.hub);
+      setAlso(link.also);
       setCode(link.code);
       return true;
     }
@@ -87,8 +90,7 @@ function JoinForm({ deviceName, onBack }: { deviceName: string; onBack: () => vo
     setBusy(true);
     setError(null);
     try {
-      await api.hubHello(hub);
-      await api.joinFamily({ url: hub, code, deviceName: device || "Tablet" });
+      await api.joinFamily({ url: hub, alsoUrls: also, code, deviceName: device || "Tablet" });
     } catch (e) {
       setError(welcomeError(e));
     } finally {
@@ -115,11 +117,22 @@ function JoinForm({ deviceName, onBack }: { deviceName: string; onBack: () => vo
           <QrCode /> Scan the code on a parent's screen
         </Button>
       )}
-      <Field label="Family hub address" hint="A parent can tell you this. It looks like 192.168.1.20:8787.">
+      <Field
+        label="Family hub address"
+        hint={
+          also.length > 0
+            ? `Plus ${also.length} more from the code, tried if this one doesn't answer.`
+            : "A parent can tell you this. It looks like 192.168.1.20:8787."
+        }
+      >
         <input
           className={inputClass}
           value={hub}
-          onChange={(e) => !takeLink(e.target.value) && setHub(e.target.value)}
+          onChange={(e) => {
+            if (takeLink(e.target.value)) return;
+            setHub(e.target.value);
+            setAlso([]);
+          }}
           placeholder="192.168.1.20:8787"
           autoCapitalize="off"
           autoCorrect="off"

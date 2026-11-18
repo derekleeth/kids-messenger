@@ -1,6 +1,6 @@
 //! Random codes and tokens, from the OS's secure random source.
 
-use sha2::{Digest, Sha256};
+use kit_protocol::proof;
 
 /// Letters and digits that can't be mixed up when read off a screen (no 0/O, 1/I/L).
 const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
@@ -37,15 +37,11 @@ pub fn enroll_code() -> String {
 
 /// A device's secret token: 32 random bytes, as hex.
 pub fn token() -> String {
-    hex(&bytes::<32>())
+    proof::hex(&bytes::<32>())
 }
 
 pub fn hash_token(token: &str) -> String {
-    hex(&Sha256::digest(token.as_bytes()))
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    proof::token_hash(token)
 }
 
 /// Codes are typed by kids: ignore case, spaces and dashes.

@@ -135,7 +135,7 @@ pub fn run() {
             commands::autostart_enabled,
             commands::set_autostart,
             commands::chat_shelf,
-            commands::change_hub,
+            commands::set_hub_addresses,
         ])
         .run(tauri::generate_context!())
         .expect("error while running KitChat");

@@ -4,6 +4,11 @@
 //! listens on `/live` and applies each change to the local copy, telling the page with a `kit://delta` event. Messages
 //! and note edits made here go into the local outbox first and are sent from this task, so nothing typed offline is
 //! lost; after a dropped connection it waits a little (longer each time) and starts over.
+//!
+//! A device can have several addresses for its hub (Tailscale, then the home network). Each connection tries them in
+//! order and stays on the first that works until it drops. With several addresses, one may belong to a stranger's
+//! machine on another network, so an unencrypted address has to prove it's the family's hub first: until then it gets
+//! no token, and nothing it says is believed.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -19,7 +24,7 @@ use tokio::sync::Notify;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::error::{AppError, AppResult};
-use crate::hub::HubClient;
+use crate::hub::{HubClient, Live, first_working};
 use crate::platform;
 use crate::secret::TokenStore;
 use crate::store::{Account, PAGE, Store, UiMessage};
@@ -80,6 +85,8 @@ pub struct Engine {
     tokens: TokenStore,
     pub media_dir: PathBuf,
     client: RwLock<Option<HubClient>>,
+    /// The current connection got through to the family's hub at `client`'s address.
+    hub_confirmed: AtomicBool,
     kick: Notify,
     /// Bumped when the account changes, so a running session stops and starts again with the new one.
     generation: AtomicU64,
@@ -110,6 +117,14 @@ pub struct DownloadProgress {
     pub total: u64,
 }
 
+/// A device's saved hub addresses, and which of them couldn't be reached when they were saved.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubAddresses {
+    pub urls: Vec<String>,
+    pub unreachable: Vec<String>,
+}
+
 /// Files made on this device and not sent yet are named `local-<ulid>` in the media folder.
 pub fn is_local(media_id: &str) -> bool {
     media_id.starts_with("local-")
@@ -132,7 +147,9 @@ impl Engine {
             }
         };
         let client = match (&account, token) {
-            (Some(account), Some(token)) => HubClient::new(&account.hub_url, Some(token)).ok(),
+            (Some(account), Some(token)) => HubClient::new(&account.hub_url, Some(token))
+                .ok()
+                .map(|client| client.with_several_addresses(account.hub_urls.len() > 1)),
             _ => None,
         };
         let state = if client.is_some() { ConnState::Connecting } else { ConnState::SignedOut };
@@ -142,6 +159,7 @@ impl Engine {
             tokens,
             media_dir,
             client: RwLock::new(client),
+            hub_confirmed: AtomicBool::new(false),
             kick: Notify::new(),
             generation: AtomicU64::new(0),
             foreground: AtomicBool::new(true),
@@ -150,7 +168,7 @@ impl Engine {
             upload_kick: Notify::new(),
             downloads: Default::default(),
         });
-        if engine.client().is_ok() {
+        if engine.hub().is_ok() {
             platform::keep_alive(&engine.app, true);
         }
         let runner = engine.clone();
@@ -160,8 +178,27 @@ impl Engine {
         engine
     }
 
+    /// The client for talking to the hub right now. Refuses while an address that has to prove itself hasn't: it could
+    /// be anyone's on this network, and this client would send it the device's token.
     pub fn client(&self) -> AppResult<HubClient> {
+        let client = self.hub()?;
+        if client.needs_proof() && !self.hub_confirmed.load(Ordering::SeqCst) {
+            return Err(AppError::Offline("the hub's address isn't confirmed yet".into()));
+        }
+        Ok(client)
+    }
+
+    /// The client as it is, confirmed or not.
+    fn hub(&self) -> AppResult<HubClient> {
         self.client.read().unwrap().clone().ok_or(AppError::NotEnrolled)
+    }
+
+    /// A different account or set of addresses: anything running on the old one stops.
+    fn replace_client(&self, client: Option<HubClient>) {
+        let mut slot = self.client.write().unwrap();
+        *slot = client;
+        self.hub_confirmed.store(false, Ordering::SeqCst);
+        self.generation.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Asks the background tasks to send what's waiting now.
@@ -223,18 +260,25 @@ impl Engine {
     }
 
     /// This device just joined a family (or set one up): keep the token, start fresh and connect.
-    pub async fn enrolled(&self, hub_url: &str, enrolled: kit_protocol::Enrolled) -> AppResult<()> {
+    /// `hub_url` is the address that worked, one of `hub_urls`.
+    pub async fn enrolled(
+        &self,
+        hub_url: &str,
+        hub_urls: Vec<String>,
+        enrolled: kit_protocol::Enrolled,
+    ) -> AppResult<()> {
         self.tokens.save(&enrolled.token)?;
         self.store.clear().await?;
+        let client = HubClient::new(hub_url, Some(enrolled.token))?.with_several_addresses(hub_urls.len() > 1);
         let account = Account {
             hub_url: hub_url.to_string(),
+            hub_urls,
             device_id: enrolled.device_id,
             me: enrolled.member,
             family_name: enrolled.family_name,
         };
         self.store.set_json("account", &account).await?;
-        *self.client.write().unwrap() = Some(HubClient::new(hub_url, Some(enrolled.token))?);
-        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.replace_client(Some(client));
         *self.status.lock().unwrap() = Status { state: ConnState::Connecting, detail: None };
         platform::keep_alive(&self.app, true);
         self.emit(self.snapshot().await?);
@@ -242,37 +286,60 @@ impl Engine {
         Ok(())
     }
 
-    /// The family's hub moved (for example from the home PC to a server): checks this device is still known at the
-    /// new address before switching to it, so nothing is lost if it's mistyped.
-    pub async fn change_hub(&self, url: &str) -> AppResult<String> {
-        let mut account = self.store.account().await?.ok_or(AppError::NotEnrolled)?;
-        let moved = self.client()?.at(url)?;
-        moved.hello().await?;
-        match moved.sync(self.store.rev().await?).await {
-            Ok(_) => {}
-            Err(AppError::Revoked) => {
-                return Err(AppError::Invalid(
-                    "That hub doesn't know this device. Is it your family's hub, with its data copied over?".into(),
-                ));
-            }
-            Err(e) => return Err(e),
+    /// Whether the hub answers at this address and knows this device.
+    async fn check_address(&self, client: &HubClient, device_id: &str, rev: i64) -> AppResult<()> {
+        if client.needs_proof() {
+            client.prove(device_id).await?;
         }
-        account.hub_url = moved.base().to_string();
+        client.hello().await.map_err(|e| match e {
+            AppError::Hub(message) => AppError::Hub(format!("{}: {message}", client.base())),
+            other => other,
+        })?;
+        client.sync(rev).await.map(|_| ())
+    }
+
+    /// Replaces this device's hub addresses, in the order to try them. At least one has to work now, so a typing
+    /// mistake can't cut the device off; one that can't be reached from here (the home address, while away) is kept and
+    /// reported. One that answers but isn't this family's hub is refused.
+    pub async fn set_hub_addresses(&self, urls: Vec<String>) -> AppResult<HubAddresses> {
+        let mut account = self.store.account().await?.ok_or(AppError::NotEnrolled)?;
+        let base = self.hub()?.with_several_addresses(urls.len() > 1);
+        let rev = self.store.rev().await?;
+        let mut working = None;
+        let mut unreachable = Vec::new();
+        for url in &urls {
+            let client = base.at(url)?;
+            match self.check_address(&client, &account.device_id, rev).await {
+                Ok(()) => working = working.or(Some(client)),
+                Err(AppError::Offline(_)) => unreachable.push(url.clone()),
+                Err(AppError::Revoked) => {
+                    return Err(AppError::Invalid(format!(
+                        "The hub at {url} doesn't know this device. Is it your family's hub, with its data copied over?"
+                    )));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        let Some(client) = working else {
+            return Err(AppError::Invalid(
+                "Couldn't reach the family hub at any of these addresses. At least one has to work from here.".into(),
+            ));
+        };
+        account.hub_url = client.base().to_string();
+        account.hub_urls = urls.clone();
         self.store.set_json("account", &account).await?;
-        *self.client.write().unwrap() = Some(moved);
-        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.replace_client(Some(client));
         *self.status.lock().unwrap() = Status { state: ConnState::Connecting, detail: None };
         self.emit(Delta { account: Some(Some(account.clone())), status: Some(self.status()), ..Default::default() });
         self.kick();
-        log::info!("hub moved to {}", account.hub_url);
-        Ok(account.hub_url)
+        log::info!("hub addresses are now {urls:?}");
+        Ok(HubAddresses { urls, unreachable })
     }
 
     /// Forgets the family on this device: signing out, or a parent removed it.
     pub async fn sign_out(&self, why: Option<String>) -> AppResult<()> {
         self.tokens.delete();
-        *self.client.write().unwrap() = None;
-        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.replace_client(None);
         self.store.clear().await?;
         if let Ok(entries) = std::fs::read_dir(&self.media_dir) {
             for entry in entries.flatten() {
@@ -289,13 +356,21 @@ impl Engine {
     async fn run(self: Arc<Self>) {
         let mut retry = FIRST_RETRY;
         loop {
-            let Ok(client) = self.client() else {
+            if self.hub().is_err() {
                 self.kick.notified().await;
                 continue;
-            };
+            }
             let generation = self.generation.load(Ordering::SeqCst);
             self.set_status(ConnState::Connecting, None);
-            match self.session(&client, generation).await {
+            let outcome = match self.connect(generation).await {
+                Ok((client, live)) => self.session(&client, live, generation).await,
+                Err(e) => Err(e),
+            };
+            // Wherever this device goes next, that address has to prove itself again.
+            if self.generation.load(Ordering::SeqCst) == generation {
+                self.hub_confirmed.store(false, Ordering::SeqCst);
+            }
+            match outcome {
                 Ok(()) => retry = FIRST_RETRY,
                 Err(AppError::Revoked) => {
                     log::info!("this device was removed from the family");
@@ -327,13 +402,62 @@ impl Engine {
         }
     }
 
-    /// One connection: catch up, then follow `/live` until it drops or the account changes.
-    async fn session(&self, client: &HubClient, generation: u64) -> AppResult<()> {
-        let mut live = client.live().await?;
+    /// Connects at the first of this device's hub addresses that works, and catches up.
+    async fn connect(&self, generation: u64) -> AppResult<(HubClient, Live)> {
+        let account = self.store.account().await?.ok_or(AppError::NotEnrolled)?;
+        let base = self.hub()?.with_several_addresses(account.hub_urls.len() > 1);
+        let (base, device_id) = (&base, account.device_id.as_str());
+        first_working(&account.hub_urls, move |url| async move {
+            let client = base.at(&url)?;
+            let live = self.open(&client, device_id, generation).await?;
+            Ok((client, live))
+        })
+        .await
+    }
+
+    /// One address: proves it's the family's hub if it has to, subscribes and catches up.
+    async fn open(&self, client: &HubClient, device_id: &str, generation: u64) -> AppResult<Live> {
+        if self.generation.load(Ordering::SeqCst) != generation {
+            return Err(AppError::Offline("the account changed".into()));
+        }
+        if client.needs_proof() {
+            // Not the hub, or not there: either way, on to the next address. A stranger's answer isn't shown.
+            client.prove(device_id).await.map_err(|e| AppError::Offline(e.to_string()))?;
+        }
+        let live = client.live().await?;
         // Subscribed first, then caught up: nothing that happens in between is missed.
         let since = self.store.rev().await?;
         let sync = client.sync(since).await?;
+        self.use_address(client, generation).await?;
         self.apply_sync(sync, since > 0).await?;
+        Ok(live)
+    }
+
+    /// From now on everything goes to the hub at this address.
+    async fn use_address(&self, client: &HubClient, generation: u64) -> AppResult<()> {
+        {
+            let mut slot = self.client.write().unwrap();
+            if self.generation.load(Ordering::SeqCst) != generation {
+                return Err(AppError::Offline("the account changed".into()));
+            }
+            *slot = Some(client.clone());
+            self.hub_confirmed.store(true, Ordering::SeqCst);
+        }
+        if let Some(mut account) = self.store.account().await?
+            && account.hub_url != client.base()
+        {
+            account.hub_url = client.base().to_string();
+            self.store.set_json("account", &account).await?;
+            log::info!("now using the hub at {}", account.hub_url);
+            self.emit(Delta { account: Some(Some(account)), ..Default::default() });
+        }
+        // Uploads waiting for the hub can carry on.
+        self.upload_kick.notify_one();
+        Ok(())
+    }
+
+    /// One connection: sends what's waiting, then follows `/live` until it drops or the account changes.
+    async fn session(&self, client: &HubClient, mut live: Live, generation: u64) -> AppResult<()> {
         self.set_status(ConnState::Online, None);
         self.flush(client).await?;
         loop {
@@ -527,7 +651,8 @@ impl Engine {
                 continue;
             }
             let mut body = entry.body.clone();
-            let locals: Vec<String> = body.media_ids_mut().into_iter().filter(|id| is_local(id)).map(|id| id.clone()).collect();
+            let locals: Vec<String> =
+                body.media_ids_mut().into_iter().filter(|id| is_local(id)).map(|id| id.clone()).collect();
             if locals.is_empty() {
                 continue;
             }

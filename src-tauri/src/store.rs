@@ -33,7 +33,11 @@ impl From<Message> for UiMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
+    /// The address in use, or last used.
     pub hub_url: String,
+    /// Every address for the hub, in the order to try them.
+    #[serde(default)]
+    pub hub_urls: Vec<String>,
     pub device_id: String,
     pub me: Member,
     pub family_name: String,
@@ -104,7 +108,14 @@ impl Store {
     }
 
     pub async fn account(&self) -> AppResult<Option<Account>> {
-        self.get_json("account").await
+        let mut account: Option<Account> = self.get_json("account").await?;
+        // Saved before a device could have several addresses.
+        if let Some(account) = &mut account
+            && account.hub_urls.is_empty()
+        {
+            account.hub_urls.push(account.hub_url.clone());
+        }
+        Ok(account)
     }
 
     pub async fn rev(&self) -> AppResult<i64> {
@@ -384,6 +395,15 @@ mod tests {
     use super::*;
     use kit_protocol::notes::{Block, BlockKind};
 
+    #[tokio::test]
+    async fn an_account_from_before_failover_has_its_one_address() {
+        let store = Store::memory().await.unwrap();
+        let me = r#"{"id":"m","name":"Sam","role":"kid","color":"mint","avatar":"🦊"}"#;
+        let saved = format!(r#"{{"hubUrl":"http://192.168.1.20:8787","deviceId":"d","me":{me},"familyName":"Lynx"}}"#);
+        store.set("account", &saved).await.unwrap();
+        assert_eq!(store.account().await.unwrap().unwrap().hub_urls, ["http://192.168.1.20:8787"]);
+    }
+
     fn msg(id: &str, at: i64) -> Message {
         Message {
             id: id.into(),
@@ -427,7 +447,8 @@ mod tests {
     #[tokio::test]
     async fn shelf_has_links_and_lists_newest_first() {
         let store = Store::memory().await.unwrap();
-        let text = |id: &str, at: i64, text: &str| Message { body: MessageBody::Text { text: text.into() }, ..msg(id, at) };
+        let text =
+            |id: &str, at: i64, text: &str| Message { body: MessageBody::Text { text: text.into() }, ..msg(id, at) };
         store.put_message(&text("a", 1, "look www.example.com")).await.unwrap();
         store.put_message(&text("b", 2, "http is a protocol")).await.unwrap();
         store.put_message(&text("c", 3, "no links here")).await.unwrap();

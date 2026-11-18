@@ -8,9 +8,9 @@ use serde::Serialize;
 use tauri::ipc::{InvokeBody, Request};
 use tauri::{AppHandle, State};
 
-use crate::engine::{Delta, Engine};
+use crate::engine::{Delta, Engine, HubAddresses};
 use crate::error::{AppError, AppResult};
-use crate::hub::{HubClient, looks_local, normalize_url};
+use crate::hub::{HubClient, looks_local, normalize_url, normalize_urls};
 use crate::platform::{self, SharedItem};
 use crate::store::{OutboxEntry, PAGE, UiMessage, outbox_message};
 
@@ -58,22 +58,47 @@ pub async fn setup_family(
     allow_home_network(&app, &url).await?;
     let client = HubClient::new(&url, None)?;
     let enrolled = client.setup(&SetupRequest { setup_code, family_name, name, device_name }).await?;
-    engine.enrolled(&url, enrolled).await
+    engine.enrolled(&url, vec![url.clone()], enrolled).await
 }
 
+/// Joins at the first address where a hub answers. `also_urls` are the other addresses a parent's QR code carries.
 #[tauri::command]
 pub async fn join_family(
     app: AppHandle,
     engine: Eng<'_>,
     url: String,
+    also_urls: Option<Vec<String>>,
     code: String,
     device_name: String,
 ) -> AppResult<()> {
-    let url = normalize_url(&url)?;
-    allow_home_network(&app, &url).await?;
-    let client = HubClient::new(&url, None)?;
-    let enrolled = client.enroll(&EnrollRequest { code, device_name }).await?;
-    engine.enrolled(&url, enrolled).await
+    let mut raw = vec![url];
+    raw.extend(also_urls.unwrap_or_default());
+    let urls = normalize_urls(&raw)?;
+    let request = EnrollRequest { code, device_name };
+    let mut failure = None;
+    for url in &urls {
+        let found = async {
+            allow_home_network(&app, url).await?;
+            let client = HubClient::new(url, None)?;
+            client.hello().await?;
+            Ok::<_, AppError>(client)
+        }
+        .await;
+        let attempt = match found {
+            Ok(client) => match client.enroll(&request).await {
+                Ok(enrolled) => return engine.enrolled(url, urls.clone(), enrolled).await,
+                // The hub said no (a wrong code, say). Another address is the same hub: it'd say no too.
+                Err(e @ AppError::Hub(_)) => return Err(e),
+                Err(e) => e,
+            },
+            Err(e) => e,
+        };
+        log::info!("joining at {url}: {attempt}");
+        if failure.as_ref().is_none_or(|f| matches!(f, AppError::Offline(_))) {
+            failure = Some(attempt);
+        }
+    }
+    Err(failure.unwrap_or(AppError::Offline("no hub address".into())))
 }
 
 #[tauri::command]
@@ -476,7 +501,8 @@ pub struct JoinCode {
     pub code: String,
     pub expires_at: i64,
     pub hub_url: String,
-    /// What the QR code holds: `kitchat://join?hub=…&code=…`.
+    pub hub_urls: Vec<String>,
+    /// What the QR code holds: `kitchat://join?hub=…&also=…&code=…`, with an `also` for each further address.
     pub link: String,
     pub qr_svg: String,
 }
@@ -485,8 +511,9 @@ pub struct JoinCode {
 pub async fn join_code(engine: Eng<'_>, member_id: String) -> AppResult<JoinCode> {
     let client = engine.client()?;
     let code = client.join_code(&member_id).await?;
-    let hub_url = client.base().to_string();
-    let link = format!("kitchat://join?hub={}&code={}", percent_encode(&hub_url), code.code);
+    let hub_urls = engine.store.account().await?.ok_or(AppError::NotEnrolled)?.hub_urls;
+    let hub_url = hub_urls.first().cloned().unwrap_or_else(|| client.base().to_string());
+    let link = join_link(&hub_urls, &hub_url, &code.code);
     let qr = qrcode::QrCode::new(link.as_bytes()).map_err(|e| AppError::Other(format!("QR code: {e}")))?;
     let qr_svg = qr
         .render::<qrcode::render::svg::Color>()
@@ -494,7 +521,13 @@ pub async fn join_code(engine: Eng<'_>, member_id: String) -> AppResult<JoinCode
         .dark_color(qrcode::render::svg::Color("#1f1147"))
         .light_color(qrcode::render::svg::Color("#ffffff"))
         .build();
-    Ok(JoinCode { code: code.code, expires_at: code.expires_at, hub_url, link, qr_svg })
+    Ok(JoinCode { code: code.code, expires_at: code.expires_at, hub_url, hub_urls, link, qr_svg })
+}
+
+fn join_link(hub_urls: &[String], hub_url: &str, code: &str) -> String {
+    let also: String =
+        hub_urls.iter().filter(|url| *url != hub_url).map(|url| format!("&also={}", percent_encode(url))).collect();
+    format!("kitchat://join?hub={}{also}&code={code}", percent_encode(hub_url))
 }
 
 #[tauri::command]
@@ -522,7 +555,6 @@ pub async fn take_shared(app: AppHandle) -> platform::Incoming {
 pub async fn pick_media(app: AppHandle) -> AppResult<Option<Vec<SharedItem>>> {
     platform::pick_media(&app).await.transpose().map_err(AppError::Other)
 }
-
 
 /// The unread count, for the taskbar button and the tray. Nothing on Android (the notifications say it there).
 #[tauri::command]
@@ -564,12 +596,14 @@ pub async fn chat_shelf(engine: Eng<'_>, chat_id: String, before: Option<String>
     engine.store.shelf(&chat_id, before.as_deref(), 100).await
 }
 
-/// The family's hub has a new address. Returns the address as it'll be used.
+/// The addresses this device tries for the family's hub, in order.
 #[tauri::command]
-pub async fn change_hub(app: AppHandle, engine: Eng<'_>, url: String) -> AppResult<String> {
-    let url = normalize_url(&url)?;
-    allow_home_network(&app, &url).await?;
-    engine.change_hub(&url).await
+pub async fn set_hub_addresses(app: AppHandle, engine: Eng<'_>, urls: Vec<String>) -> AppResult<HubAddresses> {
+    let urls = normalize_urls(&urls)?;
+    for url in &urls {
+        allow_home_network(&app, url).await?;
+    }
+    engine.set_hub_addresses(urls).await
 }
 
 #[tauri::command]
@@ -641,6 +675,19 @@ mod tests {
         assert_eq!(saved_name("01ABC", "image/jpeg").as_deref(), Some("KitChat-01ABC.jpg"));
         assert_eq!(saved_name("local-01ABC", "video/mp4").as_deref(), Some("KitChat-01ABC.mp4"));
         assert_eq!(saved_name("01ABC", ""), None);
+    }
+
+    #[test]
+    fn join_links_carry_every_address() {
+        let urls = ["http://100.1.2.3:8787".to_string(), "http://192.168.1.20:8787".to_string()];
+        assert_eq!(
+            join_link(&urls, &urls[0], "K7P3QX"),
+            "kitchat://join?hub=http%3A%2F%2F100.1.2.3%3A8787&also=http%3A%2F%2F192.168.1.20%3A8787&code=K7P3QX"
+        );
+        assert_eq!(
+            join_link(&urls[..1], &urls[0], "K7P3QX"),
+            "kitchat://join?hub=http%3A%2F%2F100.1.2.3%3A8787&code=K7P3QX"
+        );
     }
 
     #[test]

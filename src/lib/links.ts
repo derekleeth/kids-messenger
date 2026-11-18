@@ -58,12 +58,12 @@ export function isBigEmoji(text: string): boolean {
   return /^(?:\p{Extended_Pictographic}(?:️|‍\p{Extended_Pictographic}|\p{Emoji_Modifier})*\s*){1,3}$/u.test(t);
 }
 
-/** `kitchat://join?hub=…&code=…`, as a parent's QR code holds it. */
-export function parseJoinLink(text: string): { hub: string; code: string } | null {
+/** `kitchat://join?hub=…&also=…&code=…`, as a parent's QR code holds it. `also` is any further hub addresses. */
+export function parseJoinLink(text: string): { hub: string; also: string[]; code: string } | null {
   const t = text.trim();
   if (!t.toLowerCase().startsWith("kitchat://join")) return null;
   const params = new URLSearchParams(t.slice(t.indexOf("?") + 1));
   const hub = params.get("hub");
   const code = params.get("code");
-  return hub && code ? { hub, code } : null;
+  return hub && code ? { hub, also: params.getAll("also").filter(Boolean), code } : null;
 }

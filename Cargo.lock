@@ -2575,8 +2575,10 @@ dependencies = [
 name = "kit-protocol"
 version = "0.3.0"
 dependencies = [
+ "hmac 0.12.1",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -2584,6 +2586,7 @@ name = "kitchat"
 version = "0.3.0"
 dependencies = [
  "futures-util",
+ "getrandom 0.3.4",
  "jni 0.21.1",
  "keyring",
  "kit-protocol",
