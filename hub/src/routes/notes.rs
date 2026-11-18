@@ -37,12 +37,15 @@ pub async fn save(
                 return Err(ApiError::NotFound("No such note.".into()));
             }
             let was_shared = stored.shared;
-            (notes::merge(&stored, &incoming, &stored.owner_id == me), was_shared)
+            (notes::merge(&stored, &incoming, &stored.owner_id == me, me), was_shared)
         }
         None => {
             let mut note = incoming.clone();
             note.owner_id = me.clone();
             note.created_at = now_ms();
+            for block in &mut note.blocks {
+                block.edited_by = me.clone();
+            }
             (note, false)
         }
     };

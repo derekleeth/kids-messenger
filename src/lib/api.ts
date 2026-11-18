@@ -77,6 +77,8 @@ export const api = {
   discardMessage: (id: string) => call<void>("discard_message", { id }),
   /** Where a photo or video is on this device, downloading it first if needed. */
   mediaFile: (id: string) => call<string>("media_file", { id }),
+  /** Saves a photo or video to the Downloads folder (computer) or the gallery (Android), downloading it if needed. */
+  saveMedia: (id: string) => call<{ place: "downloads" | "gallery"; name: string }>("save_media", { id }),
   olderMessages: (chatId: string, before: string) => call<Message[]>("older_messages", { chatId, before }),
   markRead: (chatId: string, messageId: string) => call<void>("mark_read", { chatId, messageId }),
   react: (messageId: string, emoji: string) => call<void>("react", { messageId, emoji }),

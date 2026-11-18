@@ -113,6 +113,7 @@ pub fn run() {
             commands::retry_message,
             commands::discard_message,
             commands::media_file,
+            commands::save_media,
             commands::older_messages,
             commands::mark_read,
             commands::react,

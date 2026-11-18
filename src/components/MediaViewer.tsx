@@ -1,9 +1,12 @@
 // A photo or video, full screen. A photo shows its chat-sized picture straight away and swaps in the full-size one
-// once that's downloaded; a video downloads (with progress), then plays.
+// once that's downloaded; a video downloads (with progress), then plays. Either can be saved to the Downloads folder
+// (computer) or the gallery (Android).
 
-import { Play, X } from "lucide-react";
+import { Check, Download, LoaderCircle, Play, X } from "lucide-react";
 import { useState } from "react";
+import { api, errorText } from "../lib/api";
 import { durationText, percent, sizeText, useDownload, useMedia } from "../lib/media";
+import { toast } from "./ui";
 
 export type Viewing =
   | { kind: "image"; mediaId: string; fullMediaId?: string | null; fullBytes?: number }
@@ -62,7 +65,9 @@ function Video({ v }: { v: Extract<Viewing, { kind: "video" }> }) {
   }
   return (
     <>
-      {poster.url && <img src={poster.url} alt="" className="max-h-full max-w-full rounded-xl object-contain opacity-60" />}
+      {poster.url && (
+        <img src={poster.url} alt="" className="max-h-full max-w-full rounded-xl object-contain opacity-60" />
+      )}
       {video.failed ? (
         <div className="absolute rounded-2xl bg-black/70 px-5 py-3 text-center font-bold text-white">
           Couldn't load the video.
@@ -80,17 +85,61 @@ function Video({ v }: { v: Extract<Viewing, { kind: "video" }> }) {
   );
 }
 
+/** The file that's saved: a photo at full size when there is one, or the video itself. */
+function savedId(v: Viewing): string {
+  return v.kind === "image" ? (v.fullMediaId ?? v.mediaId) : v.videoMediaId;
+}
+
+function SaveButton({ viewing }: { viewing: Viewing }) {
+  const id = savedId(viewing);
+  const [state, setState] = useState<{ id: string; saving: boolean; saved: boolean }>({
+    id,
+    saving: false,
+    saved: false,
+  });
+  const current = state.id === id ? state : { id, saving: false, saved: false };
+  const what = viewing.kind === "image" ? "photo" : "video";
+
+  async function save(e: React.MouseEvent) {
+    e.stopPropagation();
+    if (current.saving) return;
+    setState({ id, saving: true, saved: false });
+    try {
+      const saved = await api.saveMedia(id);
+      setState({ id, saving: false, saved: true });
+      toast(saved.place === "gallery" ? `Saved the ${what} to the gallery` : `Saved to Downloads as ${saved.name}`);
+    } catch (err) {
+      setState({ id, saving: false, saved: false });
+      toast(`Couldn't save the ${what}: ${errorText(err)}`, "error");
+    }
+  }
+
+  return (
+    <button
+      className="grid size-11 place-items-center rounded-full bg-white/15 text-white disabled:opacity-70"
+      aria-label={current.saving ? `Saving ${what}` : `Save ${what}`}
+      title={`Save ${what}`}
+      disabled={current.saving}
+      onClick={save}
+    >
+      {current.saving ? <LoaderCircle className="animate-spin" /> : current.saved ? <Check /> : <Download />}
+    </button>
+  );
+}
+
 export function MediaViewer({ viewing, onClose }: { viewing: Viewing; onClose: () => void }) {
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/90 p-4" onClick={onClose}>
-      <button
-        className="absolute right-3 z-10 grid size-11 place-items-center rounded-full bg-white/15 text-white"
-        style={{ top: "max(12px, env(safe-area-inset-top))" }}
-        aria-label="Close"
-        onClick={onClose}
-      >
-        <X />
-      </button>
+      <div className="absolute right-3 z-10 flex gap-2" style={{ top: "max(12px, env(safe-area-inset-top))" }}>
+        <SaveButton viewing={viewing} />
+        <button
+          className="grid size-11 place-items-center rounded-full bg-white/15 text-white"
+          aria-label="Close"
+          onClick={onClose}
+        >
+          <X />
+        </button>
+      </div>
       {viewing.kind === "image" ? <Photo v={viewing} /> : <Video v={viewing} />}
     </div>
   );

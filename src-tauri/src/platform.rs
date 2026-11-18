@@ -146,6 +146,19 @@ pub async fn pick_media<R: Runtime>(app: &AppHandle<R>) -> Option<Result<Vec<Sha
     None
 }
 
+/// Android: copies a photo or video into the gallery (Pictures/KitChat or Movies/KitChat), named `name`.
+#[cfg(target_os = "android")]
+pub async fn save_to_gallery<R: Runtime>(
+    app: &AppHandle<R>,
+    path: &std::path::Path,
+    mime: &str,
+    name: &str,
+) -> Result<(), String> {
+    let p = plugin(app).ok_or("The gallery isn't available.")?;
+    let args = serde_json::json!({ "path": path.to_string_lossy(), "mime": mime, "name": name });
+    p.0.run_mobile_plugin_async::<serde_json::Value>("saveToGallery", args).await.map(|_| ()).map_err(|e| e.to_string())
+}
+
 /// Scans a QR code with the camera (Android, through Google's code scanner). `None` when cancelled.
 pub async fn scan<R: Runtime>(app: &AppHandle<R>) -> Result<Option<String>, String> {
     #[cfg(target_os = "android")]

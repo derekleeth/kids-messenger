@@ -10,6 +10,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Saving a photo or video from a chat to the gallery. Only Android 9 needs this; later versions save through
+         MediaStore without it (KitPlugin.kt `saveToGallery`). -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
 
     <!-- No Auto Backup: the device token and the message cache never go to cloud storage. -->
     <application

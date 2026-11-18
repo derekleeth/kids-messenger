@@ -561,6 +561,7 @@ fn block(text: &str, at: i64) -> Block {
         pos: at as f64,
         updated_at: at,
         deleted: false,
+        edited_by: String::new(),
     }
 }
 
@@ -607,6 +608,8 @@ async fn notes_are_private_until_shared_as_a_family_list() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(merged["shared"], true);
     assert_eq!(merged["blocks"][1]["checked"], true);
+    assert_eq!(merged["blocks"][0]["editedBy"], f.kid_member.id.as_str(), "the kid wrote this line");
+    assert_eq!(merged["blocks"][1]["editedBy"], f.parent_member.id.as_str(), "the parent ticked this one");
 
     // The kid shares it into the family chat: the card carries the list's lines.
     let chat = sync(&f.app, &f.kid, 0).await.chats[0].id.clone();

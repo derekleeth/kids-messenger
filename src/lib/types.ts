@@ -89,6 +89,8 @@ export interface Block {
   pos: number;
   updatedAt: number;
   deleted: boolean;
+  /** The member who last changed this line. Empty for lines from before the hub kept track. */
+  editedBy: string;
 }
 
 export interface Note {
