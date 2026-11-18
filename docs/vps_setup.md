@@ -6,7 +6,8 @@ anywhere: at home, on mobile data, at a friend's house. It assumes:
 - an **Ubuntu** VPS (22.04 or 24.04) that you can SSH into with `sudo`,
 - **nginx** already running there, maybe for other sites,
 - a **domain** you own, with a name for the hub pointed at the VPS. Below it's `chat.example.com`: add an `A` record
-  (and `AAAA` if the VPS has IPv6) for it at your DNS provider. Replace `chat.example.com` everywhere with yours.
+  (and `AAAA` if the VPS has IPv6) for it at your DNS provider ([using Cloudflare](#if-your-dns-is-on-cloudflare)).
+  Replace `chat.example.com` everywhere with yours.
 
 The plan: the hub listens only on `127.0.0.1` (the VPS itself), and nginx, which already owns ports 80 and 443,
 passes `https://chat.example.com` through to it. The hub never faces the internet directly and can't clash with
@@ -227,6 +228,36 @@ Everything the hub knows is in its data folder (`hub-data`), so moving it is a c
    `chat.example.com`. Nobody needs to re-join: the devices' sign-ins moved with the data.
 
 ## 6. nginx in front
+
+### If your DNS is on Cloudflare
+
+A DNS record can only point a name at an address, not at a port. So the record sends `chat.example.com` to the VPS,
+and nginx (below) passes that name on to the hub's port. A subdomain of a domain you already use is fine; your other
+sites aren't affected.
+
+In Cloudflare, open your domain, then **DNS › Records**, and add:
+
+| Type   | Name   | Content               | Proxy status             |
+| ------ | ------ | --------------------- | ------------------------ |
+| `A`    | `chat` | the VPS's IPv4 address | **DNS only** (grey cloud) |
+| `AAAA` | `chat` | the VPS's IPv6 address (only if it has one) | **DNS only** (grey cloud) |
+
+Check that it has arrived before running certbot. This should print the VPS's address:
+
+```bash
+getent hosts chat.example.com
+```
+
+This guide expects **DNS only**. With the orange cloud (Cloudflare's proxy) on, connections reach nginx from
+Cloudflare's addresses, which changes a few things:
+
+- Set Cloudflare's SSL/TLS mode to **Full (strict)**.
+- Make nginx restore the visitor's address, or the limits in this guide treat everyone as a few shared addresses: add
+  `set_real_ip_from` for each of [Cloudflare's address ranges](https://www.cloudflare.com/ips/), plus
+  `real_ip_header CF-Connecting-IP;`.
+- The fail2ban jail in step 8 won't block anyone, because the firewall sees Cloudflare rather than the visitor.
+
+### Limits, site and certificate
 
 First, request limits that nginx applies before anything reaches the hub. These go in the `http` level, so they get
 their own file:
