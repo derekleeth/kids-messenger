@@ -21,6 +21,7 @@ import { normalize } from "../lib/links";
 import {
   insertAfter,
   isEmpty,
+  markEdited,
   moveBlock,
   NOTE_EMOJI,
   previewLines,
@@ -31,7 +32,7 @@ import {
   visibleBlocks,
 } from "../lib/notes";
 import { memberById, otherMember, useAppState } from "../lib/state";
-import { COLORS, type Block, type BlockKind, type Note } from "../lib/types";
+import { COLORS, type Block, type BlockKind, type Member, type Note } from "../lib/types";
 import { Kit } from "./Kit";
 import { Avatar, Button, Confetti, IconButton, Sheet, toast } from "./ui";
 
@@ -105,7 +106,8 @@ export function NoteEditor({ noteId, onBack }: { noteId: string; onBack: (() => 
   const blocks = visibleBlocks(draft);
   const { done, total } = progress(draft);
 
-  const change = (next: Note) => {
+  const change = (edited: Note) => {
+    const next = markEdited(draft, edited, me);
     setDraft(next);
     window.clearTimeout(timer.current);
     timer.current = window.setTimeout(() => {
@@ -283,6 +285,8 @@ export function NoteEditor({ noteId, onBack }: { noteId: string; onBack: (() => 
               <BlockRow
                 key={b.id}
                 block={b}
+                editor={draft.shared ? memberById(members, b.editedBy) : undefined}
+                isMe={b.editedBy === me}
                 focused={focus === b.id}
                 onFocus={() => setFocus(b.id)}
                 register={(el) => {
@@ -321,6 +325,8 @@ export function NoteEditor({ noteId, onBack }: { noteId: string; onBack: (() => 
 
 function BlockRow({
   block,
+  editor,
+  isMe,
   focused,
   onFocus,
   register,
@@ -333,6 +339,9 @@ function BlockRow({
   onKey,
 }: {
   block: Block;
+  /** Who last changed this line, on a family list. */
+  editor: Member | undefined;
+  isMe: boolean;
   focused: boolean;
   onFocus: () => void;
   register: (el: HTMLInputElement | null) => void;
@@ -345,6 +354,8 @@ function BlockRow({
   onKey: (e: KeyboardEvent) => void;
 }) {
   const link = block.kind === "link" ? normalize(block.url) : null;
+  const showEditor = editor && block.kind !== "heading" && (block.text.trim() || block.url.trim());
+  const editorName = isMe ? "You" : editor?.name;
   return (
     <div className={`rounded-2xl px-2 py-1 transition ${focused ? "bg-[var(--tint-soft)]" : ""}`}>
       <div className="flex items-center gap-2">
@@ -382,6 +393,15 @@ function BlockRow({
             block.kind === "heading" ? "text-xl font-black" : "text-lg"
           } ${block.kind === "check" && block.checked ? "text-ink-soft line-through" : ""}`}
         />
+        {showEditor && (
+          <span
+            className="flex max-w-24 shrink-0 items-center gap-1 text-xs font-bold text-ink-soft"
+            title={`Last edited by ${editorName}`}
+          >
+            <Avatar member={editor} size={20} />
+            <span className="truncate">{editorName}</span>
+          </span>
+        )}
         {link && (
           <IconButton label="Open link" onClick={() => void openLink(link)} className="size-10">
             <ExternalLink size={18} />

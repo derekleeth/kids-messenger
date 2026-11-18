@@ -60,7 +60,7 @@ export const NOTE_EMOJI = [
 ];
 
 function block(kind: BlockKind, text: string, pos: number, now: number): Block {
-  return { id: ulid(now), kind, text, checked: false, url: "", pos, updatedAt: now, deleted: false };
+  return { id: ulid(now), kind, text, checked: false, url: "", pos, updatedAt: now, deleted: false, editedBy: "" };
 }
 
 export function newNote(ownerId: string, template: Template, now = Date.now()): Note {
@@ -137,6 +137,23 @@ export function moveBlock(note: Note, id: string, dir: -1 | 1, now = Date.now())
   return {
     ...note,
     blocks: note.blocks.map((b) => (b.id === id ? { ...b, pos, updatedAt: Math.max(now, b.updatedAt + 1) } : b)),
+  };
+}
+
+/**
+ * Marks `editor` on every line that says something different in `after` than in `before`, so a name shows as soon as
+ * the edit is made. Moving a line doesn't count. The hub works this out for itself when the note is saved.
+ */
+export function markEdited(before: Note, after: Note, editor: string): Note {
+  const old = new Map(before.blocks.map((b) => [b.id, b]));
+  const changed = (a: Block, b: Block) =>
+    a.kind !== b.kind || a.text !== b.text || a.checked !== b.checked || a.url !== b.url || a.deleted !== b.deleted;
+  return {
+    ...after,
+    blocks: after.blocks.map((b) => {
+      const was = old.get(b.id);
+      return !was || changed(was, b) ? { ...b, editedBy: editor } : b;
+    }),
   };
 }
 
