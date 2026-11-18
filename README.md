@@ -43,6 +43,7 @@ Same stack as TerminalLynx: Tauri 2, Rust (edition 2024), React 19, Vite, Tailwi
   anywhere.
 - [docs/sideload.md](docs/sideload.md): build the Android APK and install it on the tablets.
 - [docs/desktop.md](docs/desktop.md): the Windows app for a laptop: tray, start at sign-in, Links & lists.
+- [docs/releasing.md](docs/releasing.md): publish the Windows installer, Android APK and hub as a GitHub Release.
 
 ## Developing
 

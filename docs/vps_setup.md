@@ -43,9 +43,21 @@ side is nginx on **443**, alongside your other sites; nginx tells them apart by 
 **A different public port** (optional): if you'd rather not share 443, nginx can also serve the hub on, say, `8443`.
 The hub address in the app is then `chat.example.com:8443`. See the note at the end of step 6.
 
-## 2. Build it on the VPS
+## 2. Get the hub onto the VPS
 
-Install Rust and the build tools (as your normal user, not root):
+**On an x86-64 VPS, the quick way** is the ready-made program from the repository's GitHub **Releases**
+([releasing.md](releasing.md)). `uname -m` prints `x86_64` on one of these. Put the release's version in `V`, then skip to
+step 3:
+
+```bash
+V=0.3.0
+curl -fsSL "https://github.com/derekleeth/kids-messenger/releases/download/v$V/kitchat-hub_${V}_linux-x86_64.tar.gz" | tar -xz
+sudo install -d -m 755 /opt/kitchat
+sudo install -m 755 kitchat-hub /opt/kitchat/kitchat-hub
+```
+
+**Or build it on the VPS** (the way to go on an ARM server). Install Rust and the build tools (as your normal user, not
+root):
 
 ```bash
 sudo apt update
@@ -536,7 +548,8 @@ Messages sent after the backup are gone from the hub, but devices still show wha
 
 ## 11. Updating, checking, trouble
 
-**Updating the hub:**
+**Updating the hub:** if you installed from a release, repeat the download in step 2 with the new version, then
+`sudo systemctl restart kitchat-hub`. If you built it on the VPS:
 
 ```bash
 cd ~/kitchat && git pull && cargo build -p kitchat-hub --release

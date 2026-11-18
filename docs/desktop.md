@@ -5,16 +5,15 @@ the middle and, with **Links & lists**, everything that was sent in it on the ri
 
 ## Install it
 
-Either build the installer yourself:
+Download `KitChat_<version>_x64-setup.exe` from the repository's GitHub **Releases** ([releasing.md](releasing.md)), or
+build the installer yourself:
 
 ```bash
 npm install
 npm run desktop:build
 ```
 
-The installer is `target/release/bundle/nsis/KitChat_<version>_x64-setup.exe`. Or download it from GitHub: the
-**Desktop installer** workflow builds it on every `v*` tag (or run it by hand from the Actions tab) and attaches it to
-the run as `KitChat-windows-installer`.
+The installer is then `target/release/bundle/nsis/KitChat_<version>_x64-setup.exe`.
 
 It installs for your Windows user only (no admin needed). The installer isn't signed, so the first time Windows
 SmartScreen says it "protected your PC": choose **More info › Run anyway**.

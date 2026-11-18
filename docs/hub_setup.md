@@ -4,7 +4,10 @@ The hub is a small program that keeps the family's messages, pictures and shared
 every device as they arrive. It runs on one computer that stays on, usually the family PC. Nothing goes to any
 outside service: the database and pictures are files in one folder.
 
-## 1. Build and start it
+## 1. Get it and start it
+
+Download `kitchat-hub_<version>_windows-x64.exe` from the repository's GitHub **Releases** ([releasing.md](releasing.md))
+and rename it `kitchat-hub.exe`, or build it yourself:
 
 ```bash
 cargo build -p kitchat-hub --release

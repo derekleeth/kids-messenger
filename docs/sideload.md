@@ -1,6 +1,9 @@
 # Building the Android app and putting it on the tablets
 
-KitChat isn't in an app store: you build the APK yourself and install ("sideload") it on each phone and tablet.
+KitChat isn't in an app store: you install ("sideload") the APK on each phone and tablet. Download
+`KitChat_<version>_android-universal.apk` from the repository's GitHub **Releases** ([releasing.md](releasing.md)) and
+skip to [Install on a tablet or phone](#install-on-a-tablet-or-phone), or build it yourself as below. Use one or the
+other for a device's updates unless your own builds use the same signing key as the releases.
 
 ## One-time setup on the PC
 
@@ -56,7 +59,7 @@ emulator reaches a hub on the PC at `10.0.2.2:8787`).
 Either:
 
 - **USB**: turn on Developer options and USB debugging on the device, plug it in, and run
-  `adb install -r app-universal-release.apk` (`adb` is in `%LOCALAPPDATA%\Android\Sdk\platform-tools`).
+  `adb install -r <the APK>` (`adb` is in `%LOCALAPPDATA%\Android\Sdk\platform-tools`).
 - **Copy the file**: put the APK on the device (USB file transfer, Google Drive, …), open it in Files, and allow
   "Install unknown apps" for Files when asked.
 

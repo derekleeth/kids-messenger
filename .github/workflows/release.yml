@@ -1,0 +1,202 @@
+# Builds everything KitChat ships and, on a version tag (v0.3.0), publishes it as a GitHub Release:
+#   - the Windows desktop installer and the Windows hub
+#   - the Android APK
+#   - the Linux hub, for a VPS
+# Run by hand from the Actions tab to try the builds: the files are attached to the run and nothing is published.
+# See docs/releasing.md.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NDK_VERSION: 30.0.16248370
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      # Every version number has to agree with the tag: they name the files and set Android's update order.
+      - id: read
+        shell: bash
+        run: |
+          app=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          npm=$(node -p "require('./package.json').version")
+          cargo=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          echo "tauri.conf.json=$app package.json=$npm Cargo.toml=$cargo"
+          if [ "$app" != "$npm" ] || [ "$app" != "$cargo" ]; then
+            echo "::error::The version numbers in tauri.conf.json, package.json and Cargo.toml differ."
+            exit 1
+          fi
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$app" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match version $app."
+            exit 1
+          fi
+          echo "version=$app" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      - run: npm run typecheck && npm run lint && npm test
+      - run: cargo test -p kitchat --locked
+      - run: npm run desktop:build
+      - run: cargo build -p kitchat-hub --release --locked
+      - name: Collect the files
+        shell: bash
+        run: |
+          mkdir out
+          cp "target/release/bundle/nsis/KitChat_${VERSION}_x64-setup.exe" out/
+          cp target/release/kitchat-hub.exe "out/kitchat-hub_${VERSION}_windows-x64.exe"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: KitChat-windows
+          path: out/*
+          if-no-files-found: error
+
+  android:
+    needs: version
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the Android SDK parts
+        shell: bash
+        run: |
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdkmanager" --licenses > /dev/null || true
+          "$sdkmanager" "platforms;android-37.0" "build-tools;36.0.0" "ndk;$NDK_VERSION" > /dev/null
+          echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+      # A release must carry the family's key, or it can't update the installed app. Only a run started by hand may go
+      # without, and its APK says so in its name.
+      - name: Set up signing
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+            if [ "$GITHUB_REF_TYPE" = tag ]; then
+              echo "::error::The ANDROID_* signing secrets aren't all set (docs/releasing.md)."
+              exit 1
+            fi
+            echo "::warning::No signing key: this APK is signed with a throwaway key and is for testing only."
+            echo "APK_SUFFIX=-TEST-KEY" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/kitchat.jks"
+          # Backslashes are the one character a .properties value has to escape here.
+          {
+            echo "storeFile=$RUNNER_TEMP/kitchat.jks"
+            echo "storePassword=${KEYSTORE_PASSWORD//\\/\\\\}"
+            echo "keyAlias=${KEY_ALIAS//\\/\\\\}"
+            echo "keyPassword=${KEY_PASSWORD//\\/\\\\}"
+          } > src-tauri/gen/android/app/keystore.properties
+      - run: npm ci
+      - run: npm run tauri -- android build --apk
+      - name: Check the signature and collect the file
+        shell: bash
+        run: |
+          mkdir out
+          apk="out/KitChat_${VERSION}_android-universal${APK_SUFFIX:-}.apk"
+          cp src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk "$apk"
+          build_tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
+          "$build_tools/apksigner" verify --min-sdk-version 28 --print-certs "$apk"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: KitChat-android
+          path: out/*
+          if-no-files-found: error
+
+  hub-linux:
+    needs: version
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TARGET: x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo test -p kitchat-hub -p kit-protocol --locked
+      # musl links everything in, so the one file runs on any x86-64 Linux, whatever its age.
+      - run: cargo build -p kitchat-hub --release --locked --target "$TARGET"
+      - name: Check that it starts
+        shell: bash
+        run: |
+          "target/$TARGET/release/kitchat-hub" --data "$RUNNER_TEMP/hub-data" --bind 127.0.0.1 --port 8787 &
+          hub=$!
+          curl --silent --show-error --fail --retry 10 --retry-delay 1 --retry-connrefused http://127.0.0.1:8787/hello
+          kill "$hub"
+      - name: Collect the file
+        shell: bash
+        run: |
+          mkdir out
+          tar -czf "out/kitchat-hub_${VERSION}_linux-x86_64.tar.gz" -C "target/$TARGET/release" kitchat-hub
+      - uses: actions/upload-artifact@v7
+        with:
+          name: KitChat-hub-linux
+          path: out/*
+          if-no-files-found: error
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [windows, android, hub-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: out
+          merge-multiple: true
+      - run: cd out && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      # Re-running a failed release replaces its files rather than failing on the existing one.
+      - name: Publish
+        shell: bash
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" out/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" out/* --verify-tag --generate-notes --title "KitChat $GITHUB_REF_NAME"
+          fi
