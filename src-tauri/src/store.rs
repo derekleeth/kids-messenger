@@ -53,6 +53,15 @@ pub struct Store {
     pub pool: SqlitePool,
 }
 
+/// A message the Links & lists panel shows: a link, or a shared list or note.
+fn on_shelf(message: &Message) -> bool {
+    match &message.body {
+        MessageBody::Text { text } => !kit_protocol::links::find_all(text).is_empty(),
+        MessageBody::Note { .. } => true,
+        _ => false,
+    }
+}
+
 impl Store {
     pub async fn open(path: &Path) -> AppResult<Self> {
         let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))?
@@ -186,6 +195,40 @@ impl Store {
             out.extend(self.outbox_messages(Some(chat_id), "").await?);
         }
         Ok(out)
+    }
+
+    /// The links and lists sent in a chat, newest first (before `before`, when given): text messages with a web
+    /// link in them, and shared notes. Only what's on this device; older messages arrive as the chat is scrolled.
+    pub async fn shelf(&self, chat_id: &str, before: Option<&str>, limit: usize) -> AppResult<Vec<UiMessage>> {
+        let cursor: Option<(i64, String)> = match before {
+            Some(id) => {
+                sqlx::query_as("SELECT created_at, id FROM messages WHERE id = ?")
+                    .bind(id)
+                    .fetch_optional(&self.pool)
+                    .await?
+            }
+            None => None,
+        };
+        let (at, id) = cursor.unwrap_or((i64::MAX, "\u{10FFFF}".into()));
+        // A cheap first pass in SQL; the exact rules (kit_protocol::links) below.
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT json FROM messages WHERE chat_id = ? AND (created_at < ? OR (created_at = ? AND id < ?))
+               AND (json LIKE '%http%' OR json LIKE '%www.%' OR json LIKE '%\"note\"%')
+             ORDER BY created_at DESC, id DESC",
+        )
+        .bind(chat_id)
+        .bind(at)
+        .bind(at)
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .filter_map(|j| serde_json::from_str::<Message>(j).ok())
+            .filter(on_shelf)
+            .take(limit)
+            .map(UiMessage::from)
+            .collect())
     }
 
     pub async fn add_outbox(&self, entry: &OutboxEntry) -> AppResult<()> {
@@ -379,6 +422,29 @@ mod tests {
         let older = store.messages("c", Some("c"), 2).await.unwrap();
         let ids: Vec<_> = older.iter().map(|m| m.message.id.as_str()).collect();
         assert_eq!(ids, ["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn shelf_has_links_and_lists_newest_first() {
+        let store = Store::memory().await.unwrap();
+        let text = |id: &str, at: i64, text: &str| Message { body: MessageBody::Text { text: text.into() }, ..msg(id, at) };
+        store.put_message(&text("a", 1, "look www.example.com")).await.unwrap();
+        store.put_message(&text("b", 2, "http is a protocol")).await.unwrap();
+        store.put_message(&text("c", 3, "no links here")).await.unwrap();
+        let shared = MessageBody::Note {
+            note_id: "n".into(),
+            title: "Cool sites".into(),
+            emoji: "📝".into(),
+            preview: vec![],
+            shared: true,
+        };
+        store.put_message(&Message { body: shared, ..msg("d", 4) }).await.unwrap();
+        store.put_message(&text("e", 5, "https://kitchat.example/x and more")).await.unwrap();
+        let ids = |v: Vec<UiMessage>| v.into_iter().map(|m| m.message.id).collect::<Vec<_>>();
+        assert_eq!(ids(store.shelf("c", None, 10).await.unwrap()), ["e", "d", "a"]);
+        assert_eq!(ids(store.shelf("c", None, 2).await.unwrap()), ["e", "d"]);
+        assert_eq!(ids(store.shelf("c", Some("d"), 10).await.unwrap()), ["a"]);
+        assert!(store.shelf("other", None, 10).await.unwrap().is_empty());
     }
 
     fn note(text: &str) -> Note {

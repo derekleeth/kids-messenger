@@ -84,6 +84,11 @@ impl HubClient {
         &self.base
     }
 
+    /// The same device, talking to the hub at another address (it moved, say from home to a server).
+    pub fn at(&self, base: &str) -> AppResult<Self> {
+        Self::new(base, self.token.clone())
+    }
+
     fn req(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         let req = self.http.request(method, format!("{}{path}", self.base));
         match &self.token {

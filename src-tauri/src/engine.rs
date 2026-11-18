@@ -242,6 +242,32 @@ impl Engine {
         Ok(())
     }
 
+    /// The family's hub moved (for example from the home PC to a server): checks this device is still known at the
+    /// new address before switching to it, so nothing is lost if it's mistyped.
+    pub async fn change_hub(&self, url: &str) -> AppResult<String> {
+        let mut account = self.store.account().await?.ok_or(AppError::NotEnrolled)?;
+        let moved = self.client()?.at(url)?;
+        moved.hello().await?;
+        match moved.sync(self.store.rev().await?).await {
+            Ok(_) => {}
+            Err(AppError::Revoked) => {
+                return Err(AppError::Invalid(
+                    "That hub doesn't know this device. Is it your family's hub, with its data copied over?".into(),
+                ));
+            }
+            Err(e) => return Err(e),
+        }
+        account.hub_url = moved.base().to_string();
+        self.store.set_json("account", &account).await?;
+        *self.client.write().unwrap() = Some(moved);
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        *self.status.lock().unwrap() = Status { state: ConnState::Connecting, detail: None };
+        self.emit(Delta { account: Some(Some(account.clone())), status: Some(self.status()), ..Default::default() });
+        self.kick();
+        log::info!("hub moved to {}", account.hub_url);
+        Ok(account.hub_url)
+    }
+
     /// Forgets the family on this device: signing out, or a parent removed it.
     pub async fn sign_out(&self, why: Option<String>) -> AppResult<()> {
         self.tokens.delete();
@@ -674,5 +700,7 @@ impl Engine {
         };
         let body = if incoming.len() > 1 { format!("{}: {body}", name(&last.sender_id)) } else { body };
         platform::notify(&self.app, &title, &body);
+        // The page opens this chat when the window next comes forward (a notification's click doesn't reach us).
+        let _ = self.app.emit("kit://notified", &last.chat_id);
     }
 }

@@ -2,7 +2,7 @@
 // screen the list and the open chat or note sit side by side; on a phone or tablet held upright, one at a time.
 
 import { ListChecks, MessageCircle, Users } from "lucide-react";
-import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { ChatList } from "./components/ChatList";
 import { ChatView } from "./components/ChatView";
 import { FamilyView } from "./components/FamilyView";
@@ -12,7 +12,7 @@ import { NotesView } from "./components/NotesView";
 import { ShareSheet } from "./components/ShareSheet";
 import { Toasts, toast } from "./components/ui";
 import { Welcome } from "./components/Welcome";
-import { api, errorText, onDelta } from "./lib/api";
+import { api, errorText, isDesktopApp, onDelta, onEvent } from "./lib/api";
 import type { Attachment } from "./lib/outgoing";
 import { applyDelta, otherMember, setState, unreadCount, useAppState } from "./lib/state";
 
@@ -48,13 +48,22 @@ function useBoot() {
         setState((s) => ({ ...s, loaded: true }));
       }
     })();
-    const vis = () => void api.setForeground(document.visibilityState === "visible").catch(() => {});
+    // "In the foreground" means someone's looking: on the desktop the window must also have focus (KitChat open
+    // behind other windows, or tucked in the tray, still notifies).
+    const vis = () =>
+      void api
+        .setForeground(document.visibilityState === "visible" && (!isDesktopApp || document.hasFocus()))
+        .catch(() => {});
     vis();
     document.addEventListener("visibilitychange", vis);
+    window.addEventListener("focus", vis);
+    window.addEventListener("blur", vis);
     return () => {
       cancelled = true;
       stop?.();
       document.removeEventListener("visibilitychange", vis);
+      window.removeEventListener("focus", vis);
+      window.removeEventListener("blur", vis);
     };
   }, []);
 }
@@ -139,6 +148,26 @@ export default function App() {
   }, []);
   const clearPendingShare = useCallback(() => setPendingShare(null), []);
 
+  // Desktop: a notification was shown for this chat. When the window next comes forward (clicking the
+  // notification, the tray or the taskbar), that chat is the one that opens.
+  const notified = useRef<string | null>(null);
+  useEffect(() => {
+    if (!isDesktopApp) return;
+    let stop: (() => void) | undefined;
+    let cancelled = false;
+    void onEvent<string>("notified", (id) => (notified.current = id)).then((un) => (cancelled ? un() : (stop = un)));
+    const focus = () => {
+      if (notified.current) openChat(notified.current);
+      notified.current = null;
+    };
+    window.addEventListener("focus", focus);
+    return () => {
+      cancelled = true;
+      stop?.();
+      window.removeEventListener("focus", focus);
+    };
+  }, [openChat]);
+
   const openPerson = async (memberId: string) => {
     const me = account?.me.id ?? "";
     const existing = chats.find((c) => c.kind === "direct" && otherMember(c, me) === memberId);
@@ -148,6 +177,13 @@ export default function App() {
       toast(errorText(e), "error");
     }
   };
+
+  // The unread count on the taskbar button and in the tray.
+  const myId = account?.me.id ?? "";
+  const unreadTotal = account ? chats.reduce((n, c) => n + unreadCount(c, messages[c.id], myId), 0) : 0;
+  useEffect(() => {
+    if (isDesktopApp) void api.setUnread(unreadTotal).catch(() => {});
+  }, [unreadTotal]);
 
   if (!loaded) {
     return (
@@ -165,8 +201,7 @@ export default function App() {
     );
   }
 
-  const me = account.me.id;
-  const unread = chats.reduce((n, c) => n + unreadCount(c, messages[c.id], me), 0);
+  const unread = unreadTotal;
 
   const detail =
     tab === "chats" && chatId ? (

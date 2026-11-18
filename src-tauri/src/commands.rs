@@ -460,6 +460,54 @@ pub async fn pick_media(app: AppHandle) -> AppResult<Option<Vec<SharedItem>>> {
 }
 
 
+/// The unread count, for the taskbar button and the tray. Nothing on Android (the notifications say it there).
+#[tauri::command]
+pub fn set_unread(app: AppHandle, count: u32) {
+    #[cfg(desktop)]
+    crate::desktop::set_unread(&app, count);
+    let _ = (app, count);
+}
+
+/// Whether KitChat starts when the person signs in to the computer. Always false on Android.
+#[tauri::command]
+pub fn autostart_enabled(app: AppHandle) -> bool {
+    #[cfg(desktop)]
+    return crate::desktop::autostart_enabled(&app);
+    #[cfg(not(desktop))]
+    {
+        let _ = app;
+        false
+    }
+}
+
+#[tauri::command]
+pub fn set_autostart(app: AppHandle, on: bool) -> AppResult<bool> {
+    #[cfg(desktop)]
+    {
+        crate::desktop::set_autostart(&app, on).map_err(AppError::Other)?;
+        Ok(crate::desktop::autostart_enabled(&app))
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = (app, on);
+        Err(AppError::Invalid("Starting with the computer is only for the desktop app.".into()))
+    }
+}
+
+/// The links and lists sent in a chat, newest first, for the Links & lists panel.
+#[tauri::command]
+pub async fn chat_shelf(engine: Eng<'_>, chat_id: String, before: Option<String>) -> AppResult<Vec<UiMessage>> {
+    engine.store.shelf(&chat_id, before.as_deref(), 100).await
+}
+
+/// The family's hub has a new address. Returns the address as it'll be used.
+#[tauri::command]
+pub async fn change_hub(app: AppHandle, engine: Eng<'_>, url: String) -> AppResult<String> {
+    let url = normalize_url(&url)?;
+    allow_home_network(&app, &url).await?;
+    engine.change_hub(&url).await
+}
+
 #[tauri::command]
 pub async fn scan_qr(app: AppHandle) -> Result<Option<String>, String> {
     platform::scan(&app).await

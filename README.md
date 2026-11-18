@@ -40,6 +40,7 @@ Same stack as TerminalLynx: Tauri 2, Rust (edition 2024), React 19, Vite, Tailwi
 
 - [docs/hub_setup.md](docs/hub_setup.md): run the hub and set up the family.
 - [docs/sideload.md](docs/sideload.md): build the Android APK and install it on the tablets.
+- [docs/desktop.md](docs/desktop.md): the Windows app for a laptop: tray, start at sign-in, Links & lists.
 
 ## Developing
 

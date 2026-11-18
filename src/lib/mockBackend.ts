@@ -6,6 +6,7 @@
 //
 // Others reply now and then, and links get a preview, so the chat feels alive.
 
+import { onShelf } from "./shelf";
 import type { Account, Chat, Delta, Device, Member, Message, MessageBody, Note, OutgoingMedia, Status } from "./types";
 
 type Listener = (d: Delta) => void;
@@ -183,6 +184,54 @@ const notes: Note[] = [
   },
 ];
 
+// Things Sam sent Dad, for the Links & lists panel.
+messages.push(
+  msg(
+    "C-DAD-SAM",
+    "M-SAM",
+    { kind: "text", text: "this volcano video is so cool https://www.youtube.com/watch?v=volcano" },
+    60 * 20,
+  ),
+  msg(
+    "C-DAD-SAM",
+    "M-SAM",
+    {
+      kind: "note",
+      noteId: notes[1].id,
+      title: notes[1].title,
+      emoji: notes[1].emoji,
+      preview: ["Lego space shuttle", "Books about volcanoes"],
+      shared: false,
+    },
+    60 * 19,
+  ),
+  msg(
+    "C-DAD-SAM",
+    "M-SAM",
+    {
+      kind: "note",
+      noteId: notes[0].id,
+      title: notes[0].title,
+      emoji: notes[0].emoji,
+      preview: ["Minecraft", "Scratch", "NASA Kids"],
+      shared: true,
+    },
+    60 * 4,
+  ),
+  msg(
+    "C-DAD-SAM",
+    "M-SAM",
+    {
+      kind: "text",
+      text: "can I get this? https://www.lego.com/en-us/product/space-shuttle and also https://scratch.mit.edu/projects/123",
+    },
+    120,
+  ),
+);
+messages.sort((a, b) => a.createdAt - b.createdAt);
+
+let autostart = false;
+
 let status: Status = { state: account ? "online" : "signedOut", detail: null };
 
 function visibleNotes(): Note[] {
@@ -255,10 +304,7 @@ function wait(ms = 120) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-export async function mockInvoke<T>(
-  cmd: string,
-  args: Record<string, unknown> = {},
-): Promise<T> {
+export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
   await wait(40);
   const a = args as Record<string, never>;
   switch (cmd) {
@@ -346,6 +392,7 @@ export async function mockInvoke<T>(
     case "retry_message":
     case "discard_message":
     case "set_foreground":
+    case "set_unread":
     case "log":
       return undefined as T;
     case "media_file": {
@@ -435,6 +482,27 @@ export async function mockInvoke<T>(
       throw "Scanning needs a camera. Type the code instead.";
     case "device_name_hint":
       return "My computer" as T;
+    case "autostart_enabled":
+      return autostart as T;
+    case "set_autostart":
+      autostart = Boolean(a.on);
+      return autostart as T;
+    case "chat_shelf": {
+      const all = messages
+        .filter((m) => m.chatId === a.chatId && onShelf(m))
+        .sort((x, y) => y.createdAt - x.createdAt || (y.id < x.id ? -1 : 1));
+      const from = a.before ? all.findIndex((m) => m.id === a.before) + 1 : 0;
+      return all.slice(from, from + 100) as T;
+    }
+    case "change_hub": {
+      await wait(400);
+      const url = String(a.url).trim();
+      if (!url) throw "Type the family hub's address.";
+      const hubUrl = /^https?:\/\//.test(url) ? url : `https://${url}`;
+      account = { ...account!, hubUrl };
+      emit({ account });
+      return hubUrl as T;
+    }
     default:
       throw `mock backend: no ${cmd}`;
   }

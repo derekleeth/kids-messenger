@@ -1,8 +1,8 @@
 // The family: me (name, look, theme), everyone else, and for parents, adding people and devices.
 
-import { LogOut, Moon, Plus, QrCode, Smartphone, Sun, Trash2 } from "lucide-react";
+import { LogOut, Moon, Plus, Power, QrCode, Server, Smartphone, Sun, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { api, errorText } from "../lib/api";
+import { api, errorText, isDesktopApp } from "../lib/api";
 import { ago } from "../lib/format";
 import { useAppState } from "../lib/state";
 import { COLORS, type Device, type JoinCode, type Member, type Role } from "../lib/types";
@@ -256,6 +256,73 @@ function Devices({ members }: { members: Member[] }) {
   );
 }
 
+/** The family's hub moved (say from the home PC to a server): point this device at its new address. */
+function ChangeHub({ current, onClose }: { current: string; onClose: () => void }) {
+  const [url, setUrl] = useState(current);
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    setBusy(true);
+    try {
+      const now = await api.changeHub(url);
+      toast(`Now using the hub at ${now}`);
+      onClose();
+    } catch (e) {
+      toast(errorText(e), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Sheet title="Family hub address" onClose={onClose}>
+      <div className="flex flex-col gap-4">
+        <p className="text-ink-soft">
+          Only change this if the family hub moved, for example to a server so it works away from home. This device
+          stays signed in: KitChat checks the hub there knows it before switching.
+        </p>
+        <Field label="Hub address" hint="For example chat.example.com, or 192.168.1.20:8787 at home.">
+          <input
+            className={`${inputClass} font-mono`}
+            value={url}
+            autoFocus
+            spellCheck={false}
+            onChange={(e) => setUrl(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && !busy && void save()}
+          />
+        </Field>
+        <Button big disabled={busy || !url.trim() || url.trim() === current} onClick={() => void save()}>
+          {busy ? "Checking…" : "Use this address"}
+        </Button>
+      </div>
+    </Sheet>
+  );
+}
+
+/** Desktop: start KitChat (in the tray) when signing in to the computer. */
+function Autostart() {
+  const [on, setOn] = useState<boolean | null>(null);
+  useEffect(() => {
+    void api.autostartEnabled().then(setOn, () => setOn(false));
+  }, []);
+  if (on === null) return null;
+  return (
+    <button
+      role="switch"
+      aria-checked={on}
+      onClick={() => void api.setAutostart(!on).then(setOn, (e) => toast(errorText(e), "error"))}
+      className="card flex w-full items-center gap-3 p-4 text-left font-extrabold"
+    >
+      <Power />
+      <span className="flex-1">
+        Start KitChat when I sign in
+        <span className="block text-sm font-normal text-ink-soft">It waits in the tray, so messages still arrive.</span>
+      </span>
+      <span className={`relative h-7 w-12 rounded-full transition ${on ? "bg-brand" : "bg-line"}`}>
+        <span className={`absolute top-1 size-5 rounded-full bg-white transition-all ${on ? "left-6" : "left-1"}`} />
+      </span>
+    </button>
+  );
+}
+
 export function FamilyView({ onOpenPerson }: { onOpenPerson: (memberId: string) => void }) {
   const account = useAppState((s) => s.account)!;
   const members = useAppState((s) => s.members);
@@ -266,6 +333,7 @@ export function FamilyView({ onOpenPerson }: { onOpenPerson: (memberId: string) 
   const [editing, setEditing] = useState(false);
   const [adding, setAdding] = useState(false);
   const [codeFor, setCodeFor] = useState<Member | null>(null);
+  const [changingHub, setChangingHub] = useState(false);
 
   const others = members.filter((m) => m.id !== me.id);
 
@@ -356,11 +424,25 @@ export function FamilyView({ onOpenPerson }: { onOpenPerson: (memberId: string) 
           </div>
           <h4 className="mt-4 mb-2 px-1 font-extrabold">Devices</h4>
           <Devices members={members} />
-          <p className="mt-2 px-1 text-sm text-ink-soft">
-            Hub: <span className="font-mono">{account.hubUrl}</span>
-          </p>
         </section>
       )}
+
+      <section>
+        <h3 className="mb-2 px-1 text-sm font-black tracking-wide text-ink-soft uppercase">This device</h3>
+        <div className="flex flex-col gap-2">
+          {isDesktopApp && <Autostart />}
+          <div className="card flex items-center gap-3 p-4">
+            <Server />
+            <div className="min-w-0 flex-1">
+              <div className="font-extrabold">Family hub</div>
+              <div className="truncate font-mono text-sm text-ink-soft">{account.hubUrl}</div>
+            </div>
+            <Button tone="soft" onClick={() => setChangingHub(true)}>
+              Change
+            </Button>
+          </div>
+        </div>
+      </section>
 
       <Button tone="plain" className="self-start text-ink-soft" onClick={() => void signOut()}>
         <LogOut /> Sign out of this device
@@ -378,6 +460,7 @@ export function FamilyView({ onOpenPerson }: { onOpenPerson: (memberId: string) 
         />
       )}
       {codeFor && <JoinCodeSheet member={codeFor} onClose={() => setCodeFor(null)} />}
+      {changingHub && <ChangeHub current={account.hubUrl} onClose={() => setChangingHub(false)} />}
     </div>
   );
 }

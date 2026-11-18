@@ -2,7 +2,7 @@
   "name": "kitchat",
   "private": true,
   "license": "UNLICENSED",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,6 +12,7 @@
     "test": "vitest run",
     "e2e": "playwright test",
     "tauri": "node scripts/tauri.mjs",
+    "desktop:build": "node scripts/tauri.mjs build --bundles nsis",
     "hub": "cargo run -p kitchat-hub --",
     "lint": "eslint .",
     "format": "prettier --write .",

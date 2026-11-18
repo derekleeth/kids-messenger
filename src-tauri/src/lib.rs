@@ -5,6 +5,8 @@
 //! (src/) shows it all and calls the commands in `commands`.
 
 mod commands;
+#[cfg(desktop)]
+mod desktop;
 mod engine;
 mod error;
 mod hub;
@@ -49,18 +51,16 @@ pub fn run() {
     // A second launch brings the running window forward instead of starting another copy.
     #[cfg(desktop)]
     let builder = if profile.is_empty() {
-        builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.set_focus();
-            }
-        }))
+        builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| desktop::show(app)))
     } else {
         builder
     };
     let builder = builder.plugin(logger()).plugin(tauri_plugin_opener::init()).plugin(platform::init());
     #[cfg(desktop)]
-    let builder = builder.plugin(tauri_plugin_notification::init());
+    let builder = builder.plugin(tauri_plugin_notification::init()).plugin(tauri_plugin_autostart::init(
+        tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+        Some(vec![desktop::HIDDEN_ARG]),
+    ));
     builder
         .setup(move |app| {
             // reqwest and the WebSocket use rustls with ring.
@@ -96,6 +96,9 @@ pub fn run() {
                 media_dir,
             ));
             app.manage(engine);
+            // The window starts hidden (tauri.conf.json) and is shown here, unless KitChat started with the computer.
+            #[cfg(desktop)]
+            desktop::setup(app.handle(), data_dir.clone())?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -127,6 +130,11 @@ pub fn run() {
             commands::scan_qr,
             commands::device_name_hint,
             commands::log,
+            commands::set_unread,
+            commands::autostart_enabled,
+            commands::set_autostart,
+            commands::chat_shelf,
+            commands::change_hub,
         ])
         .run(tauri::generate_context!())
         .expect("error while running KitChat");

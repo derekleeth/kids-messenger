@@ -95,7 +95,18 @@ export const api = {
   scanQr: () => call<string | null>("scan_qr"),
   deviceNameHint: () => call<string>("device_name_hint"),
   log: (level: "info" | "warn" | "error", message: string) => call<void>("log", { level, message }),
+  /** The unread count, for the taskbar button and the tray (desktop). */
+  setUnread: (count: number) => call<void>("set_unread", { count }),
+  autostartEnabled: () => call<boolean>("autostart_enabled"),
+  setAutostart: (on: boolean) => call<boolean>("set_autostart", { on }),
+  /** Links and shared lists in a chat, newest first (older than `before`, when given). */
+  chatShelf: (chatId: string, before?: string) => call<Message[]>("chat_shelf", { chatId, before: before ?? null }),
+  /** The family's hub moved: checks this device is known there, then uses the new address. */
+  changeHub: (url: string) => call<string>("change_hub", { url }),
 };
+
+/** The desktop app (Windows, macOS, Linux), where KitChat sits in the tray and can start with the computer. */
+export const isDesktopApp = isTauri && !isAndroid;
 
 /** Opens a web link in the browser, never inside the app. */
 export async function openLink(url: string) {

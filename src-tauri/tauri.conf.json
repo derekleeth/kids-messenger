@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "KitChat",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "identifier": "com.kitchat.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -17,7 +17,8 @@
         "width": 1100,
         "height": 760,
         "minWidth": 380,
-        "minHeight": 560
+        "minHeight": 560,
+        "visible": false
       }
     ],
     "security": {
