@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   insertAfter,
   isEmpty,
+  markEdited,
   moveBlock,
   newNote,
   previewLines,
@@ -97,5 +98,21 @@ describe("notes", () => {
     let note = threeItems();
     note = updateBlock(note, visibleBlocks(note)[0].id, { checked: true }, 6000);
     expect(previewLines(note, 2)).toEqual(["☑ Milk", "☐ Apples"]);
+  });
+
+  it("marks who changed a line, but not for moving it", () => {
+    const note = threeItems();
+    const [milk, apples] = visibleBlocks(note).map((b) => b.id);
+    const editor = (n: typeof note, id: string) => n.blocks.find((b) => b.id === id)!.editedBy;
+
+    const ticked = markEdited(note, updateBlock(note, milk, { checked: true }, 7000), "mom");
+    expect(editor(ticked, milk)).toBe("mom");
+    expect(editor(ticked, apples)).toBe("");
+
+    const moved = markEdited(ticked, moveBlock(ticked, milk, 1, 7001), "dad");
+    expect(editor(moved, milk)).toBe("mom");
+
+    const [added, id] = insertAfter(moved, null, "check", 7002);
+    expect(editor(markEdited(moved, added, "dad"), id)).toBe("dad");
   });
 });

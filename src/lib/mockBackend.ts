@@ -134,7 +134,18 @@ function block(
   i: number,
   extra: Partial<Note["blocks"][number]> = {},
 ) {
-  return { id: id(), kind, text, checked: false, url: "", pos: i, updatedAt: t0, deleted: false, ...extra };
+  return {
+    id: id(),
+    kind,
+    text,
+    checked: false,
+    url: "",
+    pos: i,
+    updatedAt: t0,
+    deleted: false,
+    editedBy: "",
+    ...extra,
+  };
 }
 
 const notes: Note[] = [
@@ -146,9 +157,9 @@ const notes: Note[] = [
     color: "sky",
     shared: true,
     blocks: [
-      block("link", "Minecraft", 1, { url: "https://www.minecraft.net" }),
-      block("link", "Scratch", 2, { url: "https://scratch.mit.edu" }),
-      block("link", "NASA Kids", 3, { url: "https://spaceplace.nasa.gov" }),
+      block("link", "Minecraft", 1, { url: "https://www.minecraft.net", editedBy: "M-SAM" }),
+      block("link", "Scratch", 2, { url: "https://scratch.mit.edu", editedBy: "M-MOM" }),
+      block("link", "NASA Kids", 3, { url: "https://spaceplace.nasa.gov", editedBy: "M-DAD" }),
     ],
     createdAt: t0,
     metaUpdatedAt: t0,
@@ -177,7 +188,11 @@ const notes: Note[] = [
     emoji: "🛒",
     color: "mint",
     shared: true,
-    blocks: [block("check", "Milk", 1), block("check", "Apples", 2), block("check", "Pasta", 3, { checked: true })],
+    blocks: [
+      block("check", "Milk", 1, { editedBy: "M-DAD" }),
+      block("check", "Apples", 2, { editedBy: "M-AVA" }),
+      block("check", "Pasta", 3, { checked: true, editedBy: "M-MOM" }),
+    ],
     createdAt: t0,
     metaUpdatedAt: t0,
     rev: 1,

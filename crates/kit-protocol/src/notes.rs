@@ -4,6 +4,9 @@
 //! edited by several people at once, so the hub never takes a whole note over another: each block, and the note's own
 //! fields (title, emoji, colour, shared), keep whichever edit is newest (`updatedAt`). Deleting a block leaves a
 //! tombstone (`deleted: true`), so a device that hasn't heard of the deletion can't bring the block back.
+//!
+//! The hub also records who last changed each block (`edited_by`), from the signed-in member rather than from what the
+//! device says.
 
 use serde::{Deserialize, Serialize};
 
@@ -40,6 +43,20 @@ pub struct Block {
     pub updated_at: i64,
     #[serde(default)]
     pub deleted: bool,
+    /// The member who last changed what this block says. Set by the hub; empty for lines from before it kept track.
+    #[serde(default)]
+    pub edited_by: String,
+}
+
+impl Block {
+    /// Whether the two say the same thing. Moving a line isn't changing it, so `pos` doesn't count.
+    fn same_content(&self, other: &Block) -> bool {
+        self.kind == other.kind
+            && self.text == other.text
+            && self.checked == other.checked
+            && self.url == other.url
+            && self.deleted == other.deleted
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -107,9 +124,9 @@ struct Meta<'a> {
     shared: bool,
 }
 
-/// Combines a stored note with an incoming edit of it. `may_change_sharing` is false when the editor isn't the
-/// owner: their version of `shared` is ignored.
-pub fn merge(stored: &Note, incoming: &Note, may_change_sharing: bool) -> Note {
+/// Combines a stored note with an incoming edit of it by the member `editor`. `may_change_sharing` is false when the
+/// editor isn't the owner: their version of `shared` is ignored.
+pub fn merge(stored: &Note, incoming: &Note, may_change_sharing: bool, editor: &str) -> Note {
     let mut out = stored.clone();
 
     let stored_meta = Meta { title: &stored.title, emoji: &stored.emoji, color: &stored.color, shared: stored.shared };
@@ -124,13 +141,22 @@ pub fn merge(stored: &Note, incoming: &Note, may_change_sharing: bool) -> Note {
     }
 
     for block in &incoming.blocks {
+        let mut block = block.clone();
         match out.blocks.iter_mut().find(|b| b.id == block.id) {
             Some(existing) => {
-                if newer(block.updated_at, block, existing.updated_at, existing) {
-                    *existing = block.clone();
+                // Whatever the device says about the editor is ignored, here and when settling a tie.
+                block.edited_by = existing.edited_by.clone();
+                if newer(block.updated_at, &block, existing.updated_at, existing) {
+                    if !block.same_content(existing) {
+                        block.edited_by = editor.to_string();
+                    }
+                    *existing = block;
                 }
             }
-            None => out.blocks.push(block.clone()),
+            None => {
+                block.edited_by = editor.to_string();
+                out.blocks.push(block);
+            }
         }
     }
     out
@@ -175,6 +201,7 @@ mod tests {
             pos: 1.0,
             updated_at: at,
             deleted: false,
+            edited_by: String::new(),
         }
     }
 
@@ -203,7 +230,7 @@ mod tests {
         theirs.blocks[1].checked = true;
         theirs.blocks[1].updated_at = 6;
 
-        let merged = merge(&merge(&base, &mine, true), &theirs, true);
+        let merged = merge(&merge(&base, &mine, true, "mom"), &theirs, true, "mom");
         assert_eq!(merged.blocks[0].text, "green apples");
         assert!(merged.blocks[1].checked);
     }
@@ -212,7 +239,7 @@ mod tests {
     fn an_older_edit_does_not_win() {
         let stored = note(vec![block("a", "new", 10)]);
         let incoming = note(vec![block("a", "old", 3)]);
-        assert_eq!(merge(&stored, &incoming, true).blocks[0].text, "new");
+        assert_eq!(merge(&stored, &incoming, true, "mom").blocks[0].text, "new");
     }
 
     #[test]
@@ -221,7 +248,7 @@ mod tests {
         deleted.deleted = true;
         let stored = note(vec![deleted]);
         let stale = note(vec![block("a", "x", 2)]);
-        let merged = merge(&stored, &stale, true);
+        let merged = merge(&stored, &stale, true, "mom");
         assert!(merged.blocks[0].deleted);
         assert!(merged.visible_blocks().is_empty());
     }
@@ -230,7 +257,7 @@ mod tests {
     fn new_blocks_are_added() {
         let stored = note(vec![block("a", "x", 1)]);
         let incoming = note(vec![block("a", "x", 1), block("b", "y", 2)]);
-        assert_eq!(merge(&stored, &incoming, true).blocks.len(), 2);
+        assert_eq!(merge(&stored, &incoming, true, "mom").blocks.len(), 2);
     }
 
     #[test]
@@ -240,17 +267,64 @@ mod tests {
         incoming.shared = false;
         incoming.title = "Renamed".into();
         incoming.meta_updated_at = 5;
-        let merged = merge(&stored, &incoming, false);
+        let merged = merge(&stored, &incoming, false, "mom");
         assert!(merged.shared);
         assert_eq!(merged.title, "Renamed");
-        assert!(!merge(&stored, &incoming, true).shared);
+        assert!(!merge(&stored, &incoming, true, "mom").shared);
     }
 
     #[test]
     fn ties_are_settled_the_same_way_in_either_order() {
         let a = note(vec![block("a", "one", 4)]);
         let b = note(vec![block("a", "two", 4)]);
-        assert_eq!(merge(&a, &b, true).blocks, merge(&b, &a, true).blocks);
+        let text = |n: Note| n.blocks[0].text.clone();
+        assert_eq!(text(merge(&a, &b, true, "mom")), text(merge(&b, &a, true, "mom")));
+    }
+
+    #[test]
+    fn the_last_person_to_change_a_line_is_remembered() {
+        let mut first = block("a", "milk", 1);
+        first.edited_by = "kid".into();
+        let stored = note(vec![first, block("b", "eggs", 1)]);
+        let mut incoming = stored.clone();
+        incoming.blocks[0].checked = true;
+        incoming.blocks[0].updated_at = 5;
+        incoming.blocks.push(block("c", "jam", 5));
+
+        let merged = merge(&stored, &incoming, true, "mom");
+        assert_eq!(merged.blocks[0].edited_by, "mom");
+        assert_eq!(merged.blocks[1].edited_by, "", "an untouched line keeps its editor");
+        assert_eq!(merged.blocks[2].edited_by, "mom");
+    }
+
+    #[test]
+    fn moving_a_line_does_not_change_who_edited_it() {
+        let mut first = block("a", "milk", 1);
+        first.edited_by = "kid".into();
+        let stored = note(vec![first]);
+        let mut incoming = stored.clone();
+        incoming.blocks[0].pos = 9.0;
+        incoming.blocks[0].updated_at = 5;
+
+        let merged = merge(&stored, &incoming, true, "mom");
+        assert_eq!(merged.blocks[0].pos, 9.0);
+        assert_eq!(merged.blocks[0].edited_by, "kid");
+    }
+
+    #[test]
+    fn a_device_cannot_name_someone_else_as_the_editor() {
+        let mut first = block("a", "milk", 1);
+        first.edited_by = "kid".into();
+        let stored = note(vec![first]);
+
+        let mut same_time = stored.clone();
+        same_time.blocks[0].edited_by = "zzz".into();
+        assert_eq!(merge(&stored, &same_time, true, "mom").blocks[0].edited_by, "kid");
+
+        let mut changed = same_time.clone();
+        changed.blocks[0].text = "oat milk".into();
+        changed.blocks[0].updated_at = 5;
+        assert_eq!(merge(&stored, &changed, true, "mom").blocks[0].edited_by, "mom");
     }
 
     #[test]
