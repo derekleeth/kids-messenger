@@ -5,11 +5,13 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
-use axum::http::{Request, StatusCode, header};
+use axum::extract::ConnectInfo;
+use axum::http::{HeaderMap, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use kit_protocol::notes::{Block, BlockKind, Note};
 use kit_protocol::*;
-use kitchat_hub::{Hub, app, open_in_memory};
+use kitchat_hub::limits::Config;
+use kitchat_hub::{Hub, app, open_in_memory, open_in_memory_with};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -53,6 +55,33 @@ async fn call(app: &Router, method: &str, path: &str, token: Option<&str>, body:
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
     let value = if bytes.is_empty() { Value::Null } else { serde_json::from_slice(&bytes).unwrap_or(Value::Null) };
     (status, value)
+}
+
+/// A request from `peer` (a socket address, as the server would see it) with extra headers.
+async fn call_from(
+    app: &Router,
+    peer: &str,
+    headers: &[(&str, &str)],
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    body: Option<Value>,
+) -> (StatusCode, HeaderMap) {
+    let peer: std::net::SocketAddr = peer.parse().unwrap();
+    let mut req = Request::builder().method(method).uri(path).extension(ConnectInfo(peer));
+    for (name, value) in headers {
+        req = req.header(*name, *value);
+    }
+    if let Some(token) = token {
+        req = req.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    let req = match body {
+        Some(body) => req.header(header::CONTENT_TYPE, "application/json").body(Body::from(body.to_string())),
+        None => req.body(Body::empty()),
+    }
+    .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    (res.status(), res.headers().clone())
 }
 
 async fn raw(app: &Router, method: &str, path: &str, token: Option<&str>, body: Vec<u8>) -> (StatusCode, Vec<u8>) {
@@ -169,12 +198,143 @@ async fn join_codes_work_once_and_only_parents_manage_the_family() {
 #[tokio::test]
 async fn too_many_wrong_codes_lock_joining_for_a_while() {
     let f = family().await;
-    for _ in 0..10 {
+    // From ten different addresses: the hub-wide guard still counts them all.
+    for i in 0..10 {
         let req = json!({ "code": "ZZZZZZ", "deviceName": "x" });
-        assert_eq!(call(&f.app, "POST", "/enroll", None, Some(req)).await.0, StatusCode::BAD_REQUEST);
+        let peer = format!("203.0.113.{i}:4000");
+        let status = call_from(&f.app, &peer, &[], "POST", "/enroll", None, Some(req)).await.0;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
     let req = json!({ "code": "ZZZZZZ", "deviceName": "x" });
-    assert_eq!(call(&f.app, "POST", "/enroll", None, Some(req)).await.0, StatusCode::TOO_MANY_REQUESTS);
+    let (status, headers) = call_from(&f.app, "203.0.113.99:4000", &[], "POST", "/enroll", None, Some(req)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(headers.contains_key(header::RETRY_AFTER));
+}
+
+#[tokio::test]
+async fn one_address_gets_five_wrong_codes() {
+    let dir = temp_dir();
+    // A higher scale loosens the request rate but not the wrong-code limit, so this tests the latter alone.
+    let hub = open_in_memory_with(dir.0.clone(), Config { trust_proxy: false, scale: 10.0 }).await.unwrap();
+    let app = app(hub);
+    let req = json!({ "code": "ZZZZZZ", "deviceName": "x" });
+    for _ in 0..5 {
+        let status = call_from(&app, "198.51.100.1:1", &[], "POST", "/enroll", None, Some(req.clone())).await.0;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    let status = call_from(&app, "198.51.100.1:1", &[], "POST", "/enroll", None, Some(req.clone())).await.0;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    let status = call_from(&app, "198.51.100.2:1", &[], "POST", "/enroll", None, Some(req)).await.0;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// `/enroll` with a body it can't read: refused before any code is checked, so only the request rate counts.
+async fn enroll_junk(app: &Router, peer: &str, headers: &[(&str, &str)]) -> (StatusCode, HeaderMap) {
+    call_from(app, peer, headers, "POST", "/enroll", None, Some(json!({}))).await
+}
+
+#[tokio::test]
+async fn joining_is_rate_limited_per_address() {
+    let dir = temp_dir();
+    let app = app(open_in_memory(dir.0.clone()).await.unwrap());
+    for _ in 0..5 {
+        assert_eq!(enroll_junk(&app, "198.51.100.1:1", &[]).await.0, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let (status, headers) = enroll_junk(&app, "198.51.100.1:1", &[]).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    let wait: u64 = headers[header::RETRY_AFTER].to_str().unwrap().parse().unwrap();
+    assert!((1..=6).contains(&wait), "{wait}");
+    assert_eq!(enroll_junk(&app, "198.51.100.2:1", &[]).await.0, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn wrong_tokens_shut_an_address_out() {
+    let f = family().await;
+    let from = async |peer: &str, token: Option<&str>| call_from(&f.app, peer, &[], "GET", "/sync", token, None).await;
+    for _ in 0..20 {
+        assert_eq!(from("198.51.100.7:1", Some("nope")).await.0, StatusCode::UNAUTHORIZED);
+    }
+    // Even a good token is refused from that address now, and so are the open paths.
+    let kid = f.kid.as_str();
+    let (status, headers) = from("198.51.100.7:1", Some(kid)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    let wait: u64 = headers[header::RETRY_AFTER].to_str().unwrap().parse().unwrap();
+    assert!(wait > 14 * 60, "{wait}");
+    let status = call_from(&f.app, "198.51.100.7:1", &[], "GET", "/hello", None, None).await.0;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    // Missing tokens count too.
+    for _ in 0..20 {
+        assert_eq!(from("198.51.100.8:1", None).await.0, StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(from("198.51.100.8:1", Some(kid)).await.0, StatusCode::TOO_MANY_REQUESTS);
+    // Other addresses are fine.
+    assert_eq!(from("198.51.100.9:1", Some(kid)).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn proxy_headers_are_ignored_unless_trusted() {
+    // Without --trust-proxy, X-Forwarded-For can't spread one client over many addresses.
+    let dir = temp_dir();
+    let plain = app(open_in_memory(dir.0.clone()).await.unwrap());
+    for i in 0..5 {
+        let xff = format!("192.0.2.{i}");
+        let status = enroll_junk(&plain, "127.0.0.1:1", &[("x-forwarded-for", &xff)]).await.0;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let status = enroll_junk(&plain, "127.0.0.1:1", &[("x-forwarded-for", "192.0.2.200")]).await.0;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    // With it, from a proxy on loopback, each forwarded client gets its own limit...
+    let dir2 = temp_dir();
+    let trusted = app(open_in_memory_with(dir2.0.clone(), Config { trust_proxy: true, scale: 1.0 }).await.unwrap());
+    for i in 0..10 {
+        let xff = format!("10.9.9.9, 192.0.2.{i}");
+        let status = enroll_junk(&trusted, "127.0.0.1:1", &[("x-forwarded-for", &xff)]).await.0;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{xff}");
+    }
+    // ...the right-most X-Forwarded-For entry (added by the proxy) is the one that counts, not what the client sent...
+    for _ in 0..5 {
+        enroll_junk(&trusted, "127.0.0.1:1", &[("x-forwarded-for", "192.0.2.50")]).await;
+    }
+    let status = enroll_junk(&trusted, "[::1]:1", &[("x-forwarded-for", "1.2.3.4, 192.0.2.50")]).await.0;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    // ...X-Real-IP comes first...
+    let headers = [("x-real-ip", "192.0.2.51"), ("x-forwarded-for", "192.0.2.50")];
+    assert_eq!(enroll_junk(&trusted, "127.0.0.1:1", &headers).await.0, StatusCode::UNPROCESSABLE_ENTITY);
+    // ...but a client connecting directly can't use the headers.
+    for i in 0..5 {
+        let fake = format!("192.0.2.{}", 100 + i);
+        enroll_junk(&trusted, "198.51.100.3:1", &[("x-forwarded-for", &fake), ("x-real-ip", &fake)]).await;
+    }
+    let status = enroll_junk(&trusted, "198.51.100.3:1", &[("x-real-ip", "192.0.2.199")]).await.0;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn every_answer_has_the_security_headers() {
+    let f = family().await;
+    let check = |headers: &HeaderMap, api: bool| {
+        assert_eq!(headers["x-content-type-options"], "nosniff");
+        assert_eq!(headers["x-frame-options"], "DENY");
+        assert_eq!(headers["referrer-policy"], "no-referrer");
+        assert_eq!(headers["content-security-policy"], "default-src 'none'; frame-ancestors 'none'");
+        let no_store = headers.get(header::CACHE_CONTROL).is_some_and(|v| v == "no-store");
+        assert_eq!(no_store, api, "{headers:?}");
+    };
+    let peer = "198.51.100.1:1";
+    check(&call_from(&f.app, peer, &[], "GET", "/hello", None, None).await.1, true);
+    check(&call_from(&f.app, peer, &[], "GET", "/sync", Some(&f.kid), None).await.1, true);
+    check(&call_from(&f.app, peer, &[], "GET", "/sync", None, None).await.1, true);
+    check(&call_from(&f.app, peer, &[], "GET", "/nowhere", None, None).await.1, false);
+
+    let jpeg = vec![0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x02, 1, 2, 3, 0xFF, 0xD9];
+    let (status, body) = raw(&f.app, "POST", "/media", Some(&f.kid), jpeg).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let media_id = serde_json::from_slice::<Value>(&body).unwrap()["mediaId"].as_str().unwrap().to_string();
+    let (status, headers) =
+        call_from(&f.app, peer, &[], "GET", &format!("/media/{media_id}"), Some(&f.kid), None).await;
+    assert_eq!(status, StatusCode::OK);
+    check(&headers, false);
 }
 
 #[tokio::test]
@@ -316,7 +476,8 @@ async fn big_uploads_come_in_chunks_and_videos_lose_their_location() {
     let udta = [&((xyz.len() + 8) as u32).to_be_bytes()[..], b"udta", &xyz].concat();
     video.extend([&((udta.len() + 8) as u32).to_be_bytes()[..], b"moov", &udta].concat());
 
-    let (status, state) = call(&f.app, "POST", "/media/uploads", Some(&f.kid), Some(json!({ "size": video.len() }))).await;
+    let (status, state) =
+        call(&f.app, "POST", "/media/uploads", Some(&f.kid), Some(json!({ "size": video.len() }))).await;
     assert_eq!(status, StatusCode::OK);
     let id = state["uploadId"].as_str().unwrap().to_string();
     let path = format!("/media/uploads/{id}");
@@ -327,7 +488,10 @@ async fn big_uploads_come_in_chunks_and_videos_lose_their_location() {
     assert_eq!(raw(&f.app, "PUT", &format!("{path}?offset=0"), Some(&f.kid), first.to_vec()).await.0, StatusCode::OK);
     // Finishing early, or a chunk at the wrong place, is refused; the state says where to carry on.
     assert_eq!(call(&f.app, "POST", &format!("{path}/finish"), Some(&f.kid), None).await.0, StatusCode::BAD_REQUEST);
-    assert_eq!(raw(&f.app, "PUT", &format!("{path}?offset=5"), Some(&f.kid), rest.to_vec()).await.0, StatusCode::CONFLICT);
+    assert_eq!(
+        raw(&f.app, "PUT", &format!("{path}?offset=5"), Some(&f.kid), rest.to_vec()).await.0,
+        StatusCode::CONFLICT
+    );
     assert_eq!(call(&f.app, "GET", &path, Some(&f.kid), None).await.1["received"], 20);
     assert_eq!(raw(&f.app, "PUT", &format!("{path}?offset=20"), Some(&f.kid), rest.to_vec()).await.0, StatusCode::OK);
     let (status, done) = call(&f.app, "POST", &format!("{path}/finish"), Some(&f.kid), None).await;
@@ -353,7 +517,14 @@ async fn big_uploads_come_in_chunks_and_videos_lose_their_location() {
 
     let chat = sync(&f.app, &f.kid, 0).await.chats[0].id.clone();
     let body = json!({ "kind": "video", "videoMediaId": media_id, "width": 1080, "height": 1920, "durationMs": 1500, "bytes": video.len() });
-    let (status, msg) = call(&f.app, "POST", &format!("/chats/{chat}/messages"), Some(&f.kid), Some(json!({ "id": ulid(), "body": body }))).await;
+    let (status, msg) = call(
+        &f.app,
+        "POST",
+        &format!("/chats/{chat}/messages"),
+        Some(&f.kid),
+        Some(json!({ "id": ulid(), "body": body })),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(msg["body"]["kind"], "video");
 

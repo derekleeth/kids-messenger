@@ -8,6 +8,7 @@
 pub mod auth;
 pub mod db;
 pub mod error;
+pub mod limits;
 pub mod live;
 pub mod preview;
 pub mod random;
@@ -18,7 +19,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use sqlx::SqlitePool;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, broadcast, watch};
 
 pub use routes::router;
 
@@ -31,6 +32,10 @@ pub struct Hub {
     pub guard: auth::CodeGuard,
     /// Fetches link previews. `None` turns previews off (tests, or `--no-previews`).
     pub previews: Option<preview::Fetcher>,
+    /// Rate limits, lockouts and the client-address rules ([`limits`]).
+    pub limits: Arc<limits::Limits>,
+    /// Set to true when the hub is shutting down, so `/live` sockets close.
+    pub stopping: watch::Sender<bool>,
 }
 
 impl Hub {
@@ -46,6 +51,7 @@ impl Hub {
 pub struct Options {
     pub data_dir: PathBuf,
     pub previews: bool,
+    pub limits: limits::Config,
 }
 
 /// Opens (or creates) the hub's database in `data_dir` and gets it ready to serve.
@@ -63,12 +69,14 @@ pub async fn open(options: Options) -> Result<Arc<Hub>, error::ApiError> {
         setup_code: Mutex::new(setup_code),
         guard: auth::CodeGuard::default(),
         previews,
+        limits: Arc::new(limits::Limits::new(options.limits)),
+        stopping: watch::Sender::new(false),
     }))
 }
 
-/// The router with the hub attached.
+/// The router with the hub attached, behind the limits and security headers ([`limits::guard`]).
 pub fn app(hub: Arc<Hub>) -> Router {
-    router().with_state(hub)
+    router().layer(axum::middleware::from_fn_with_state(hub.clone(), limits::guard)).with_state(hub)
 }
 
 pub fn now_ms() -> i64 {
@@ -82,6 +90,11 @@ pub fn setup_code_file(data_dir: &Path) -> PathBuf {
 
 /// A hub with an in-memory database and no link previews, for tests.
 pub async fn open_in_memory(data_dir: PathBuf) -> Result<Arc<Hub>, error::ApiError> {
+    open_in_memory_with(data_dir, limits::Config::default()).await
+}
+
+/// [`open_in_memory`] with other limits.
+pub async fn open_in_memory_with(data_dir: PathBuf, limits: limits::Config) -> Result<Arc<Hub>, error::ApiError> {
     std::fs::create_dir_all(data_dir.join("media"))?;
     std::fs::create_dir_all(data_dir.join("uploads"))?;
     let pool = db::open_memory().await?;
@@ -93,5 +106,7 @@ pub async fn open_in_memory(data_dir: PathBuf) -> Result<Arc<Hub>, error::ApiErr
         setup_code: Mutex::new(Some(random::setup_code())),
         guard: auth::CodeGuard::default(),
         previews: None,
+        limits: Arc::new(limits::Limits::new(limits)),
+        stopping: watch::Sender::new(false),
     }))
 }

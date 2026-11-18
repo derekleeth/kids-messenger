@@ -10,6 +10,7 @@ use sqlx::SqliteConnection;
 
 use super::{check_id, clean_name};
 use crate::error::{ApiError, ApiResult};
+use crate::limits::ClientIp;
 use crate::{Hub, db, now_ms, random};
 
 pub async fn hello(State(hub): State<Arc<Hub>>) -> ApiResult<Json<Hello>> {
@@ -42,7 +43,12 @@ async fn add_device(conn: &mut SqliteConnection, member_id: &str, device_name: &
     Ok((id, token))
 }
 
-pub async fn setup(State(hub): State<Arc<Hub>>, Json(req): Json<SetupRequest>) -> ApiResult<Json<Enrolled>> {
+pub async fn setup(
+    State(hub): State<Arc<Hub>>,
+    ClientIp(ip): ClientIp,
+    Json(req): Json<SetupRequest>,
+) -> ApiResult<Json<Enrolled>> {
+    hub.limits.check_code(ip)?;
     hub.guard.check()?;
     let mut setup_code = hub.setup_code.lock().await;
     let Some(expected) = setup_code.as_deref() else {
@@ -50,6 +56,7 @@ pub async fn setup(State(hub): State<Arc<Hub>>, Json(req): Json<SetupRequest>) -
     };
     if !random::same(&random::clean_code(&req.setup_code), expected) {
         hub.guard.failed();
+        hub.limits.wrong_code(ip);
         return Err(ApiError::bad("That setup code isn't right. It's shown where the hub was started."));
     }
     let family_name = clean_name(&req.family_name, 40, "family name")?;
@@ -94,7 +101,12 @@ pub async fn setup(State(hub): State<Arc<Hub>>, Json(req): Json<SetupRequest>) -
     Ok(Json(Enrolled { token, device_id, member, family_name }))
 }
 
-pub async fn enroll(State(hub): State<Arc<Hub>>, Json(req): Json<EnrollRequest>) -> ApiResult<Json<Enrolled>> {
+pub async fn enroll(
+    State(hub): State<Arc<Hub>>,
+    ClientIp(ip): ClientIp,
+    Json(req): Json<EnrollRequest>,
+) -> ApiResult<Json<Enrolled>> {
+    hub.limits.check_code(ip)?;
     hub.guard.check()?;
     let code = random::clean_code(&req.code);
     let mut tx = hub.pool.begin().await?;
@@ -107,6 +119,7 @@ pub async fn enroll(State(hub): State<Arc<Hub>>, Json(req): Json<EnrollRequest>)
     .await?;
     let Some(member_id) = member_id else {
         hub.guard.failed();
+        hub.limits.wrong_code(ip);
         return Err(ApiError::bad(
             "That code didn't work. Codes work once, for 10 minutes: ask a parent for a new one.",
         ));

@@ -8,13 +8,15 @@ use std::time::Duration;
 
 use axum::extract::State;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
 use kit_protocol::Event;
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::Hub;
 use crate::auth::Authed;
+use crate::error::ApiError;
+use crate::limits::{LiveSlot, MAX_WS_MESSAGE};
 
 /// Who an event is for.
 #[derive(Debug, Clone)]
@@ -51,11 +53,18 @@ pub fn send(hub: &Hub, audience: Audience, event: Event) {
 const PING_EVERY: Duration = Duration::from_secs(25);
 
 pub async fn handler(State(hub): State<Arc<Hub>>, authed: Authed, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| run(hub, authed, socket))
+    let Some(slot) = hub.limits.live_slot(&authed.device_id) else {
+        log::warn!("refused a live connection for device {}: too many open", authed.device_id);
+        return ApiError::RateLimited(Duration::from_secs(5)).into_response();
+    };
+    ws.max_message_size(MAX_WS_MESSAGE)
+        .max_frame_size(MAX_WS_MESSAGE)
+        .on_upgrade(move |socket| run(hub, authed, socket, slot))
 }
 
-async fn run(hub: Arc<Hub>, authed: Authed, socket: WebSocket) {
+async fn run(hub: Arc<Hub>, authed: Authed, socket: WebSocket, _slot: LiveSlot) {
     let mut events = hub.live.subscribe();
+    let mut stopping = hub.stopping.subscribe();
     let (mut tx, mut rx) = socket.split();
     let mut ping = tokio::time::interval(PING_EVERY);
     log::info!("{} connected (device {})", authed.member.name, authed.device_id);
@@ -84,6 +93,11 @@ async fn run(hub: Arc<Hub>, authed: Authed, socket: WebSocket) {
                 // Devices send nothing but pings and pongs; changes go through REST.
                 Some(Ok(_)) => {}
             },
+            // The hub is shutting down: close, so shutdown doesn't wait for devices to hang up.
+            _ = stopping.changed() => {
+                let _ = tx.send(WsMessage::Close(None)).await;
+                break;
+            }
             _ = ping.tick() => {
                 if tx.send(WsMessage::Ping(Vec::new().into())).await.is_err() {
                     break;
