@@ -4,11 +4,15 @@ import android.app.Activity
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.ContentValues
 import android.content.Intent
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.MediaStore
 import android.util.Log
 import android.webkit.WebView
 import androidx.activity.result.ActivityResult
@@ -17,6 +21,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import java.io.File
 import app.tauri.PermissionState
 import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
@@ -39,6 +44,8 @@ import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 
 private const val NOTIFICATIONS = "notifications"
 private const val LOCAL_NETWORK = "localNetwork"
+private const val STORAGE = "storage"
+private const val GALLERY_FOLDER = "KitChat"
 private const val MESSAGES_CHANNEL = "messages"
 private const val TAG = "KitPlugin"
 private const val MAX_PICKED = 20
@@ -47,6 +54,13 @@ private const val MAX_PICKED = 20
 class NotifyArgs {
   var title: String = ""
   var body: String = ""
+}
+
+@InvokeArg
+class SaveArgs {
+  var path: String = ""
+  var mime: String = ""
+  var name: String = ""
 }
 
 @InvokeArg
@@ -65,11 +79,14 @@ class KeepAliveArgs {
  *   them from there.
  * - `localNetwork`: Android 17's permission to reach the home network, asked before joining a hub there.
  * - `scan`: a join QR code, through Google's code scanner (no camera permission needed).
+ * - `saveToGallery`: a photo or video from a chat into Pictures/KitChat or Movies/KitChat. No permission needed on
+ *   Android 10+; Android 9 asks for storage once.
  */
 @TauriPlugin(
   permissions = [
     Permission(strings = ["android.permission.POST_NOTIFICATIONS"], alias = NOTIFICATIONS),
     Permission(strings = ["android.permission.ACCESS_LOCAL_NETWORK"], alias = LOCAL_NETWORK),
+    Permission(strings = ["android.permission.WRITE_EXTERNAL_STORAGE"], alias = STORAGE),
   ],
 )
 class KitPlugin(private val activity: Activity) : Plugin(activity) {
@@ -284,6 +301,74 @@ class KitPlugin(private val activity: Activity) : Plugin(activity) {
   @PermissionCallback
   private fun localNetworkAnswered(invoke: Invoke) {
     invoke.resolve(JSObject().put("granted", getPermissionState(LOCAL_NETWORK) == PermissionState.GRANTED))
+  }
+
+  /** Copies a downloaded photo or video (in the app's media folder) into the gallery. */
+  @Command
+  fun saveToGallery(invoke: Invoke) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && getPermissionState(STORAGE) != PermissionState.GRANTED) {
+      requestPermissionForAlias(STORAGE, invoke, "storageAnswered")
+      return
+    }
+    save(invoke)
+  }
+
+  @PermissionCallback
+  private fun storageAnswered(invoke: Invoke) {
+    if (getPermissionState(STORAGE) == PermissionState.GRANTED) {
+      save(invoke)
+    } else {
+      invoke.reject("KitChat needs permission to save to the gallery.")
+    }
+  }
+
+  private fun save(invoke: Invoke) {
+    val args = invoke.parseArgs(SaveArgs::class.java)
+    // A video can be big; not on the main thread.
+    Thread {
+      try {
+        saveFile(File(args.path), args.mime, args.name)
+        invoke.resolve()
+      } catch (e: Exception) {
+        Log.w(TAG, "save to gallery", e)
+        invoke.reject("Couldn't save it to the gallery (${e.message ?: e.javaClass.simpleName}).")
+      }
+    }.start()
+  }
+
+  private fun saveFile(from: File, mime: String, name: String) {
+    val video = mime.startsWith("video/")
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+      val resolver = activity.contentResolver
+      val collection = if (video) {
+        MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+      } else {
+        MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+      }
+      val folder = if (video) Environment.DIRECTORY_MOVIES else Environment.DIRECTORY_PICTURES
+      val values = ContentValues().apply {
+        put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+        put(MediaStore.MediaColumns.MIME_TYPE, mime)
+        put(MediaStore.MediaColumns.RELATIVE_PATH, "$folder/$GALLERY_FOLDER")
+        put(MediaStore.MediaColumns.IS_PENDING, 1)
+      }
+      val uri = resolver.insert(collection, values) ?: throw Exception("the gallery said no")
+      try {
+        resolver.openOutputStream(uri)?.use { out -> from.inputStream().use { it.copyTo(out) } }
+          ?: throw Exception("the gallery said no")
+        resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+      } catch (e: Exception) {
+        resolver.delete(uri, null, null)
+        throw e
+      }
+    } else {
+      val folder = if (video) Environment.DIRECTORY_MOVIES else Environment.DIRECTORY_PICTURES
+      @Suppress("DEPRECATION")
+      val dir = File(Environment.getExternalStoragePublicDirectory(folder), GALLERY_FOLDER).apply { mkdirs() }
+      val to = File(dir, name)
+      if (!to.exists()) from.copyTo(to)
+      MediaScannerConnection.scanFile(activity, arrayOf(to.path), arrayOf(mime), null)
+    }
   }
 
   @Command

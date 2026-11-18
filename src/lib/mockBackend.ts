@@ -400,6 +400,29 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
       if (!bytes) throw "That picture is gone.";
       return URL.createObjectURL(new Blob([bytes.slice()], { type: typeOf(bytes) })) as T;
     }
+    case "save_media": {
+      // The browser's own download.
+      const bytes = media.get(String(a.id));
+      if (!bytes) throw "That picture is gone.";
+      const type = typeOf(bytes);
+      const ext =
+        {
+          "image/jpeg": "jpg",
+          "image/png": "png",
+          "image/gif": "gif",
+          "image/webp": "webp",
+          "video/mp4": "mp4",
+          "video/webm": "webm",
+          "image/svg+xml": "svg",
+        }[type] ?? "bin";
+      const name = `KitChat-${a.id}.${ext}`;
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(new Blob([bytes.slice()], { type }));
+      link.download = name;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(link.href), 10_000);
+      return { place: "downloads", name } as T;
+    }
     case "older_messages":
       return [] as T;
     case "mark_read": {

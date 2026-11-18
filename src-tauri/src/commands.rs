@@ -312,10 +312,74 @@ pub async fn discard_message(engine: Eng<'_>, id: String) -> AppResult<()> {
 /// hub first when it isn't here yet. `kit://download` events say how that's going.
 #[tauri::command]
 pub async fn media_file(engine: Eng<'_>, id: String) -> AppResult<String> {
+    check_media_id(&id)?;
+    Ok(engine.media_file(&id).await?.to_string_lossy().into_owned())
+}
+
+fn check_media_id(id: &str) -> AppResult<()> {
     if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return Err(AppError::Invalid("bad picture ID".into()));
     }
-    Ok(engine.media_file(&id).await?.to_string_lossy().into_owned())
+    Ok(())
+}
+
+/// The file name a saved photo or video gets: from its ID, so saving the same one twice doesn't make a copy.
+fn saved_name(id: &str, kind: &str) -> Option<String> {
+    let ext = match kind {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/heic" => "heic",
+        "image/avif" => "avif",
+        "video/mp4" => "mp4",
+        "video/quicktime" => "mov",
+        "video/webm" => "webm",
+        _ => return None,
+    };
+    Some(format!("KitChat-{}.{ext}", id.trim_start_matches("local-")))
+}
+
+/// Where `save_media` put a photo or video: "downloads" (a computer's Downloads folder) or "gallery" (Android).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Saved {
+    pub place: &'static str,
+    pub name: String,
+}
+
+/// Saves a photo or video from a chat where the person can find it outside KitChat: the Downloads folder on a
+/// computer, the gallery (Pictures/KitChat or Movies/KitChat) on Android. Downloads it from the hub first if needed.
+#[tauri::command]
+pub async fn save_media(app: AppHandle, engine: Eng<'_>, id: String) -> AppResult<Saved> {
+    check_media_id(&id)?;
+    let from = engine.media_file(&id).await?;
+    let kind = sniff_file(&from).await?;
+    let name = saved_name(&id, kind).ok_or_else(|| AppError::Invalid("That file can't be saved.".into()))?;
+    #[cfg(target_os = "android")]
+    {
+        let _ = &engine;
+        platform::save_to_gallery(&app, &from, kind, &name).await.map_err(AppError::Other)?;
+        Ok(Saved { place: "gallery", name })
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        use tauri::Manager;
+        let dir = app.path().download_dir().map_err(|_| AppError::Other("There's no Downloads folder.".into()))?;
+        tokio::fs::create_dir_all(&dir).await?;
+        let to = dir.join(&name);
+        if !tokio::fs::try_exists(&to).await.unwrap_or(false) {
+            // Copied next to it first, so a half-copied video never sits in Downloads under its real name.
+            let part = dir.join(format!("{name}.part"));
+            if let Err(e) = tokio::fs::copy(&from, &part).await {
+                let _ = tokio::fs::remove_file(&part).await;
+                return Err(e.into());
+            }
+            tokio::fs::rename(&part, &to).await?;
+        }
+        log::info!("saved {id} to {}", to.display());
+        Ok(Saved { place: "downloads", name })
+    }
 }
 
 /// Older messages of a chat, before `before`: from the local copy, or from the hub when it has run out.
@@ -570,6 +634,13 @@ mod tests {
         assert_eq!(picture_from_json(&serde_json::json!([256])), None);
         assert_eq!(picture_from_json(&serde_json::json!({"5": 1})), None);
         assert_eq!(picture_from_json(&serde_json::json!("abc")), None);
+    }
+
+    #[test]
+    fn saved_names() {
+        assert_eq!(saved_name("01ABC", "image/jpeg").as_deref(), Some("KitChat-01ABC.jpg"));
+        assert_eq!(saved_name("local-01ABC", "video/mp4").as_deref(), Some("KitChat-01ABC.mp4"));
+        assert_eq!(saved_name("01ABC", ""), None);
     }
 
     #[test]
