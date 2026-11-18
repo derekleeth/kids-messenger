@@ -344,6 +344,10 @@ mod tests {
         {
             assert!(!is_public_ip(ip.parse().unwrap()), "{ip}");
         }
+        // The cloud metadata address: on a VPS, the one most worth refusing.
+        assert!(!is_public_ip("169.254.169.254".parse().unwrap()));
+        assert!(!is_public_ip("::ffff:169.254.169.254".parse().unwrap()));
+        assert!(!is_public_url(&Url::parse("http://169.254.169.254/latest/meta-data/").unwrap()));
         assert!(is_public_ip("93.184.216.34".parse().unwrap()));
         assert!(is_public_ip("2606:4700::1111".parse().unwrap()));
         assert!(!is_public_url(&Url::parse("http://192.168.0.1/admin").unwrap()));

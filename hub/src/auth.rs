@@ -10,6 +10,7 @@ use axum::http::request::Parts;
 use kit_protocol::{Member, Role};
 
 use crate::error::{ApiError, ApiResult};
+use crate::limits::ClientIp;
 use crate::{Hub, db, now_ms, random};
 
 pub struct Authed {
@@ -59,14 +60,31 @@ impl FromRequestParts<Arc<Hub>> for Authed {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, hub: &Arc<Hub>) -> Result<Self, Self::Rejection> {
-        let token = bearer(parts).ok_or(ApiError::Unauthorized)?;
-        device_for_token(hub, token).await
+        let ip = parts.extensions.get::<ClientIp>().map(|c| c.0);
+        let authed = match bearer(parts) {
+            Some(token) => device_for_token(hub, token).await,
+            None => Err(ApiError::Unauthorized),
+        };
+        match authed {
+            Ok(authed) => {
+                hub.limits.device_request(&authed.device_id)?;
+                Ok(authed)
+            }
+            Err(ApiError::Unauthorized) => {
+                if let Some(ip) = ip {
+                    hub.limits.bad_token(ip);
+                }
+                Err(ApiError::Unauthorized)
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 
 /// Slows down guessing setup and enrollment codes: after `MAX_FAILURES` wrong codes within `WINDOW`, every code is
-/// refused until the window has passed. One family, a handful of devices: a global limit is enough, and it means a
-/// guesser can't get around it by changing address.
+/// refused until the window has passed. It's hub-wide, so a guesser can't get around it by changing address; there's
+/// also a tighter limit per address ([`crate::limits::Limits::check_code`]) so one guesser can't lock everyone out
+/// for long on their own.
 #[derive(Default)]
 pub struct CodeGuard {
     failures: Mutex<Vec<Instant>>,

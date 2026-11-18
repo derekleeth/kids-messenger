@@ -27,12 +27,23 @@ On its first start it prints a **setup code** (also saved in `hub-data\SETUP-COD
 
 Options:
 
-| Option          | Default                     | What it does                                        |
-| --------------- | --------------------------- | --------------------------------------------------- |
-| `--data DIR`    | `./hub-data` (KITCHAT_DATA) | Where the database and pictures are kept. Back it up. |
-| `--port N`      | `8787` (KITCHAT_PORT)       | The port the app connects to.                       |
-| `--bind ADDR`   | `0.0.0.0`                   | Which network to listen on (`127.0.0.1` = this PC only, e.g. behind a tunnel). |
-| `--no-previews` | previews on                 | Don't fetch link previews (titles and pictures for shared links). |
+| Option                 | Default                       | What it does |
+| ---------------------- | ----------------------------- | ------------ |
+| `--data DIR`           | `./hub-data` (KITCHAT_DATA)   | Where the database and pictures are kept. Back it up. |
+| `--port N`             | `8787` (KITCHAT_PORT)         | The port the app connects to. |
+| `--bind ADDR`          | `0.0.0.0` (KITCHAT_BIND)      | Which network to listen on (`127.0.0.1` = this computer only, e.g. behind a tunnel or nginx). |
+| `--no-previews`        | previews on (KITCHAT_NO_PREVIEWS=1 turns them off) | Don't fetch link previews (titles and pictures for shared links). |
+| `--trust-proxy`        | off (KITCHAT_TRUST_PROXY=1)   | The hub is behind a reverse proxy on the same computer (nginx): take each device's address from `X-Real-IP` (or the last `X-Forwarded-For`), but only from connections that come from `127.0.0.1`/`::1`. Use it with `--bind 127.0.0.1`; the hub warns if you don't. |
+| `--rate-limit-scale X` | `1` (KITCHAT_RATE_LIMIT_SCALE) | Multiplies the rate limits below, e.g. `2` for twice as many requests. |
+
+A flag wins over its environment variable.
+
+The hub protects itself on its own: joining and setting up (`/hello`, `/setup`, `/enroll`) are limited to 10 a minute
+per address; an address that sends 20 wrong device tokens in 10 minutes is refused for 15 minutes; each device may make
+20 requests a second, each address 40; an address gets 5 wrong codes in 10 minutes (and the whole hub 10); each device
+may keep 3 live connections open, 64 in all. Requests that run over 30 seconds are stopped (except live connections
+and pictures and videos). Too many requests get `429 Too Many Requests` with a `Retry-After` time; the app waits and
+tries again.
 
 Link previews are fetched by the hub, not the kids' tablets, and only from public internet addresses.
 

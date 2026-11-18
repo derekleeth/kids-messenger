@@ -18,6 +18,9 @@ pub enum ApiError {
     Conflict(String),
     #[error("Too many wrong codes. Wait a few minutes and try again.")]
     TooManyAttempts,
+    /// Too many requests; try again after this long (sent as `Retry-After`).
+    #[error("The family hub is busy with too many requests. Try again in a moment.")]
+    RateLimited(std::time::Duration),
     #[error("database: {0}")]
     Db(#[from] sqlx::Error),
     #[error("database setup: {0}")]
@@ -44,7 +47,7 @@ impl ApiError {
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
-            Self::TooManyAttempts => StatusCode::TOO_MANY_REQUESTS,
+            Self::TooManyAttempts | Self::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -60,6 +63,15 @@ impl IntoResponse for ApiError {
         } else {
             self.to_string()
         };
-        (status, Json(ErrorBody { error })).into_response()
+        let retry_after = match self {
+            Self::RateLimited(wait) => Some(wait.as_secs().max(1)),
+            Self::TooManyAttempts => Some(60),
+            _ => None,
+        };
+        let mut res = (status, Json(ErrorBody { error })).into_response();
+        if let Some(secs) = retry_after {
+            res.headers_mut().insert(axum::http::header::RETRY_AFTER, secs.into());
+        }
+        res
     }
 }
