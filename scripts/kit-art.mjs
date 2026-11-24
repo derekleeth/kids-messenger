@@ -6,7 +6,7 @@
 //
 // Add a picture: drop it in art/kit/ and add a line to MOODS.
 
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import sharp from "sharp";
 
@@ -181,4 +181,14 @@ for (const [density, px] of Object.entries({ mdpi: 108, hdpi: 162, xhdpi: 216, x
     .png()
     .toFile(join(ANDROID_RES, `mipmap-${density}`, "ic_launcher_foreground.png"));
 }
-console.log(`android adaptive icon → ${ANDROID_RES}/mipmap-*/ic_launcher_foreground.png`);
+// Both the square and the round icon point at the adaptive layers. The manifest names a roundIcon, and launchers that
+// draw circles (Pixel) take it first: without an adaptive round version they shrink the old flat ic_launcher_round.png
+// into a white circle, and Kit ends up tiny.
+const adaptive = `<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+  <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
+  <background android:drawable="@color/ic_launcher_background"/>
+</adaptive-icon>`;
+for (const name of ["ic_launcher", "ic_launcher_round"])
+  writeFileSync(join(ANDROID_RES, "mipmap-anydpi-v26", `${name}.xml`), adaptive);
+console.log(`android adaptive icon → ${ANDROID_RES}/mipmap-*/ic_launcher_foreground.png, mipmap-anydpi-v26/*.xml`);
