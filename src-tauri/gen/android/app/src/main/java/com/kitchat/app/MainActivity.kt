@@ -15,6 +15,18 @@ class MainActivity : TauriActivity() {
     super.onCreate(savedInstanceState)
     // Opened from another app's Share button.
     if (savedInstanceState == null) KitPlugin.received(intent)
+    Updater.start(this)
+  }
+
+  // An update waits until KitChat is off screen (Updater.kt).
+  override fun onStart() {
+    super.onStart()
+    Updater.appShown(this)
+  }
+
+  override fun onStop() {
+    Updater.appHidden(this)
+    super.onStop()
   }
 
   // Shared to while already open (the Activity is singleTask).

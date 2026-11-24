@@ -13,6 +13,10 @@
     <!-- Saving a photo or video from a chat to the gallery. Only Android 9 needs this; later versions save through
          MediaStore without it (KitPlugin.kt `saveToGallery`). -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+    <!-- Updating itself from the GitHub Releases (Updater.kt): "Install unknown apps", allowed once per device, and on
+         Android 12+ installing its own updates without a confirmation each time. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
 
     <!-- No Auto Backup: the device token and the message cache never go to cloud storage. -->
     <application
@@ -54,5 +58,14 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Keeps a private family messenger connected to the family's own home server so new messages from family members arrive and are notified while the app is in the background. The app does not use Firebase or any push service." />
         </service>
+
+        <!-- The installer's results, and "just updated" (Updater.kt). -->
+        <receiver
+            android:name=".UpdateReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>
