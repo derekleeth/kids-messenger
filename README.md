@@ -29,7 +29,7 @@ pictures and screenshots, share links and make lists, all with only the family, 
 | ---------------------- | -------------------------------------------------------------------------- |
 | `src/`                 | The app's screens (React, TypeScript, Tailwind)                            |
 | `src-tauri/`           | The app's Rust side: local cache, outbox, hub connection, notifications    |
-| `src-tauri/gen/android`| Android: share target, background service, QR scanner (`KitPlugin.kt`)     |
+| `src-tauri/gen/android`| Android: share target, background service, QR scanner (`KitPlugin.kt`), self-update (`Updater.kt`) |
 | `hub/`                 | The family hub server (axum, SQLite)                                       |
 | `crates/kit-protocol/` | What the app and the hub send each other, shared by both                   |
 | `art/kit/`             | Kit's original artwork; `node scripts/kit-art.mjs` makes the app's PNGs    |

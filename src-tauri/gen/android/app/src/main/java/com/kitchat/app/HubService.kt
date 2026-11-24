@@ -36,6 +36,7 @@ class HubService : Service() {
   override fun onCreate() {
     super.onCreate()
     running = true
+    Updater.start(this)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
       val channel = NotificationChannel(CHANNEL_ID, "Staying connected", NotificationManager.IMPORTANCE_MIN)
       channel.description = "Shown while KitChat stays connected to get new messages"

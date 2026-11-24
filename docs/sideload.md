@@ -63,7 +63,22 @@ Either:
 - **Copy the file**: put the APK on the device (USB file transfer, Google Drive, …), open it in Files, and allow
   "Install unknown apps" for Files when asked.
 
-Updates install the same way, over the old version, keeping messages and sign-in.
+Updates install the same way, over the old version, keeping messages and sign-in. Versions after 0.4.0 also
+update themselves (below).
+
+## Automatic updates
+
+About twice a day KitChat checks the repository's GitHub Releases. When there's a newer version it downloads the APK
+(only on Wi-Fi or another unmetered network), checks it against `SHA256SUMS.txt` and that it's signed with the same key,
+and installs it the next time KitChat has been off screen for a minute, so it never closes in the middle of a message.
+
+- **The first update on each device** asks to allow "Install unknown apps" for KitChat: tap the "A KitChat update is
+  ready" notification and turn it on. On **Android 12 and newer**, later updates then install without asking.
+- **Android 9–11** asks every time: tap the notification, then **Update**.
+- An update ends KitChat's connection to the hub, like a restart does. A "KitChat was updated" notification asks to
+  open it again; until then messages wait on the hub.
+- It only installs releases signed with the key the device's KitChat has. A copy you built yourself with a different
+  key (or a debug build) is left alone.
 
 ## First start on each device
 

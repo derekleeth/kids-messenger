@@ -52,6 +52,9 @@ messages are on the hub first; afterwards the device joins the family again with
    git push origin v0.4.0
    ```
 
+Within about half a day, phones and tablets with a KitChat newer than 0.4.0 download the new APK and install it
+([sideload.md](sideload.md#automatic-updates)). Draft and pre-release releases are skipped.
+
 The workflow stops without publishing if a build or test fails, the tag doesn't match the version, or the signing
 secrets are missing. After fixing a problem that didn't need a code change, re-run the workflow; a re-run replaces the
 release's files. A code fix needs a new version and tag.
