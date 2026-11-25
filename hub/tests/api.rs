@@ -683,3 +683,87 @@ async fn the_hub_proves_itself_to_its_own_devices_nearby() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["proof"], expected.as_str());
 }
+
+#[tokio::test]
+async fn hello_and_sync_say_which_hub_and_family() {
+    let f = family().await;
+    let (_, hello) = call(&f.app, "GET", "/hello", None, None).await;
+    let hello: Hello = serde_json::from_value(hello).unwrap();
+    assert_eq!(hello.hub_id.as_deref(), Some(f.hub.hub_id.as_str()));
+    assert!(hello.family_id.is_some_and(|id| !id.is_empty()));
+    assert_eq!(sync(&f.app, &f.kid, 0).await.hub_id, hello.hub_id);
+
+    // A hub that isn't set up has an ID, but no family yet.
+    let dir = temp_dir();
+    let new = app(open_in_memory(dir.0.clone()).await.unwrap());
+    let (_, hello) = call(&new, "GET", "/hello", None, None).await;
+    assert!(hello["hubId"].is_string());
+    assert!(hello.get("familyId").is_none());
+}
+
+#[tokio::test]
+async fn a_hub_keeps_its_id_and_a_copy_of_its_data_gets_its_own() {
+    let dir = temp_dir();
+    let open =
+        |data_dir| kitchat_hub::open(kitchat_hub::Options { data_dir, previews: false, limits: Config::default() });
+    let (home, copy) = (dir.0.join("home"), dir.0.join("copy"));
+    let hub = open(home.clone()).await.unwrap();
+    let id = hub.hub_id.clone();
+    hub.pool.close().await;
+    drop(hub);
+    std::fs::create_dir_all(&copy).unwrap();
+    std::fs::copy(home.join("kitchat-hub.db"), copy.join("kitchat-hub.db")).unwrap();
+
+    let again = open(home).await.unwrap();
+    assert_eq!(again.hub_id, id);
+    let copied = open(copy).await.unwrap();
+    assert_ne!(copied.hub_id, id);
+    again.pool.close().await;
+    copied.pool.close().await;
+}
+
+#[tokio::test]
+async fn a_message_sent_late_keeps_the_time_it_was_written() {
+    let f = family().await;
+    let family_chat = sync(&f.app, &f.kid, 0).await.chats[0].id.clone();
+    let path = format!("/chats/{family_chat}/messages");
+    let written = kitchat_hub::now_ms() - 3 * 60 * 60 * 1000;
+    let id = ulid::Ulid::from_parts(written as u64, 1).to_string();
+    let msg = json!({ "id": id, "body": { "kind": "text", "text": "at the lake" }, "sentAt": written });
+    let (status, body) = call(&f.app, "POST", &path, Some(&f.kid), Some(msg)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["createdAt"], written);
+
+    // A time that doesn't match the message's own ID isn't believed.
+    let before = kitchat_hub::now_ms();
+    let msg = json!({ "id": ulid(), "body": { "kind": "text", "text": "hi" }, "sentAt": written });
+    let (_, body) = call(&f.app, "POST", &path, Some(&f.kid), Some(msg)).await;
+    assert!(body["createdAt"].as_i64().unwrap() >= before);
+}
+
+#[tokio::test]
+async fn a_reaction_taken_away_is_gone() {
+    let f = family().await;
+    let family_chat = sync(&f.app, &f.kid, 0).await.chats[0].id.clone();
+    let id = ulid();
+    let msg = json!({ "id": id, "body": { "kind": "text", "text": "pizza?" } });
+    call(&f.app, "POST", &format!("/chats/{family_chat}/messages"), Some(&f.kid), Some(msg)).await;
+    let react = format!("/messages/{id}/reactions");
+    let (_, body) = call(&f.app, "POST", &react, Some(&f.parent), Some(json!({ "emoji": "🍕" }))).await;
+    assert_eq!(body["reactions"].as_array().unwrap().len(), 1);
+    let (_, body) = call(&f.app, "POST", &react, Some(&f.parent), Some(json!({ "emoji": "" }))).await;
+    assert!(body["reactions"].as_array().unwrap().is_empty());
+    assert!(sync(&f.app, &f.kid, 0).await.messages[0].reactions.is_empty());
+}
+
+#[tokio::test]
+async fn a_direct_chat_id_comes_from_its_two_members() {
+    let f = family().await;
+    let req = json!({ "memberId": f.parent_member.id });
+    let (_, chat) = call(&f.app, "POST", "/chats/direct", Some(&f.kid), Some(req)).await;
+    let mut pair = [f.parent_member.id.clone(), f.kid_member.id.clone()];
+    pair.sort();
+    let expected = kitchat_hub::direct_chat_id(&pair.join(":"));
+    assert_eq!(chat["id"], expected.as_str());
+    assert!(ulid::Ulid::from_string(&expected).is_ok());
+}

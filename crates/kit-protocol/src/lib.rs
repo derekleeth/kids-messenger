@@ -194,6 +194,13 @@ pub struct Hello {
     pub family_name: String,
     /// True until the first parent has set the family up.
     pub needs_setup: bool,
+    /// This hub, out of the family's hubs: a device keeps its sync position (`rev`) for each hub separately, since
+    /// every hub counts its changes on its own. `None` from hubs before 0.6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hub_id: Option<String>,
+    /// The family, the same on every hub it has. `None` until the family is set up, and from hubs before 0.6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family_id: Option<String>,
 }
 
 /// The first parent sets up the family with the code the hub printed when it started.
@@ -255,6 +262,29 @@ pub struct SendMessage {
     /// Chosen by the device (a ULID), so a resend is stored once.
     pub id: String,
     pub body: MessageBody,
+    /// When it was written, for a message the device sends later (from its outbox, after being offline). The hub
+    /// keeps it as the message's time if it's believable ([`sent_at_to_keep`]), so the message sorts where it was
+    /// written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_at: Option<i64>,
+}
+
+/// How far back a device's `sentAt` is believed: a week, about as long as an outbox would hold a message.
+pub const SENT_AT_MAX_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+/// How far a `sentAt` may be ahead of the hub's clock, or away from the time in the message's own ULID.
+pub const SENT_AT_SLACK_MS: i64 = 10 * 60 * 1000;
+
+/// The time to keep for message `id`, sent with `sent_at` and arriving at `now`: `sent_at` if it isn't in the future,
+/// isn't more than [`SENT_AT_MAX_AGE_MS`] old, and is close to the ULID's own time (the device makes both when the
+/// message is written); otherwise `now`.
+pub fn sent_at_to_keep(id: &str, sent_at: Option<i64>, now: i64) -> i64 {
+    let Some(sent_at) = sent_at else { return now };
+    let Ok(ulid) = ulid::Ulid::from_string(id) else { return now };
+    let id_time = ulid.timestamp_ms() as i64;
+    let believable = sent_at <= now + SENT_AT_SLACK_MS
+        && sent_at >= now - SENT_AT_MAX_AGE_MS
+        && (sent_at - id_time).abs() <= SENT_AT_SLACK_MS;
+    if believable { sent_at.min(now) } else { now }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -298,6 +328,9 @@ pub struct UploadState {
 #[serde(rename_all = "camelCase")]
 pub struct SyncResponse {
     pub rev: i64,
+    /// The hub `rev` belongs to ([`Hello::hub_id`]). `None` from hubs before 0.6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hub_id: Option<String>,
     pub me: Option<Member>,
     pub family_name: String,
     pub members: Vec<Member>,
@@ -394,6 +427,26 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"type\":\"noteDeleted\""));
         assert_eq!(serde_json::from_str::<Event>(&json).unwrap(), event);
+    }
+
+    #[test]
+    fn a_believable_sent_at_is_kept_and_anything_else_is_now() {
+        let now = 1_800_000_000_000;
+        let written = now - 6 * 60 * 60 * 1000;
+        let id = ulid::Ulid::from_parts(written as u64, 7).to_string();
+        assert_eq!(sent_at_to_keep(&id, Some(written), now), written);
+        assert_eq!(sent_at_to_keep(&id, None, now), now);
+        // Far from the ULID's own time.
+        assert_eq!(sent_at_to_keep(&id, Some(written - 60 * 60 * 1000), now), now);
+        // Older than a week.
+        let old = now - SENT_AT_MAX_AGE_MS - 1;
+        assert_eq!(sent_at_to_keep(&ulid::Ulid::from_parts(old as u64, 7).to_string(), Some(old), now), now);
+        // A little ahead of the hub's clock is taken as now; far ahead isn't believed.
+        let ahead = now + 60 * 1000;
+        assert_eq!(sent_at_to_keep(&ulid::Ulid::from_parts(ahead as u64, 7).to_string(), Some(ahead), now), now);
+        let far = now + SENT_AT_SLACK_MS + 1;
+        assert_eq!(sent_at_to_keep(&ulid::Ulid::from_parts(far as u64, 7).to_string(), Some(far), now), now);
+        assert_eq!(sent_at_to_keep("not-a-ulid", Some(written), now), now);
     }
 
     #[test]
