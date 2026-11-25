@@ -8,7 +8,7 @@ import { useBack } from "../lib/back";
 import { dayLabel, sameDay } from "../lib/format";
 import { mediaFiles } from "../lib/images";
 import { type Attachment, fromBlobs } from "../lib/outgoing";
-import { memberById, mergeMessages, otherMember, setState, useAppState } from "../lib/state";
+import { memberById, mergeMessages, otherMember, readBy, setState, useAppState } from "../lib/state";
 import type { Message } from "../lib/types";
 import { Composer } from "./Composer";
 import { Kit } from "./Kit";
@@ -59,6 +59,13 @@ export function ChatView({
       clearPendingShare?.();
     }
   }, [pendingShare, clearPendingShare]);
+
+  // Kit hops when a message goes, then leaves so the newest message's ticks show.
+  useEffect(() => {
+    if (!hop) return;
+    const t = setTimeout(() => setHop(0), 1200);
+    return () => clearTimeout(t);
+  }, [hop]);
 
   // Keep to the newest message as they arrive, unless scrolled up to read older ones.
   useLayoutEffect(() => {
@@ -116,11 +123,8 @@ export function ChatView({
   const other = isFamily ? undefined : memberById(members, otherMember(chat, me) ?? "");
   const title = isFamily ? "Family chat" : (other?.name ?? "Chat");
   const lastMine = [...messages].reverse().find((m) => m.senderId === me && !m.pending);
-  const seenBy = lastMine
-    ? chat.memberIds
-        .filter((id) => id !== me && (chat.readUpTo[id] ?? "") >= lastMine.id)
-        .map((id) => memberById(members, id))
-    : [];
+  // Who saw it shows only in the family chat: in a 1:1 chat the ticks say it.
+  const seenBy = lastMine && isFamily ? readBy(chat, lastMine.id, me).map((id) => memberById(members, id)) : [];
 
   return (
     <div className="flex h-full min-h-0">
