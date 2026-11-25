@@ -9,5 +9,6 @@ publish.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+ulid.workspace = true
 hmac = "0.12"
 sha2 = "0.10"

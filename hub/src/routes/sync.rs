@@ -99,5 +99,15 @@ pub async fn sync(
         .await?
     };
 
-    Ok(Json(SyncResponse { rev, me: Some(authed.member), family_name, members, chats, messages, notes, deleted_notes }))
+    Ok(Json(SyncResponse {
+        rev,
+        hub_id: Some(hub.hub_id.clone()),
+        me: Some(authed.member),
+        family_name,
+        members,
+        chats,
+        messages,
+        notes,
+        deleted_notes,
+    }))
 }

@@ -237,7 +237,9 @@ Everything the hub knows is in its data folder (`hub-data`), so moving it is a c
    ```
 
 5. After step 6, on **each device** open **Family › This device › Change hub address** and enter
-   `chat.example.com`. Nobody needs to re-join: the devices' sign-ins moved with the data.
+   `chat.example.com`. Nobody needs to re-join: the devices' sign-ins moved with the data. Data in a new place counts
+   as a new hub (it gets a new hub ID, so a copy is never mistaken for the hub it came from), so each device catches
+   up with it once from the start, as when it first joined. Its messages, lists and pictures are all still there.
 
 ## 6. nginx in front
 

@@ -33,14 +33,18 @@ pub async fn create(
     let mut tx = hub.pool.begin().await?;
     let rev = db::next_rev(&mut tx).await?;
     let id = ulid::Ulid::new().to_string();
-    sqlx::query("INSERT INTO members (id, name, role, color, avatar, created_at, rev) VALUES (?, ?, ?, ?, ?, ?, ?)")
-        .bind(&id)
-        .bind(&name)
-        .bind(db::role_str(req.role))
-        .bind(&req.color)
-        .bind(&req.avatar)
-        .bind(now_ms())
-        .bind(rev)
+    let now = now_ms();
+    sqlx::query(
+        "INSERT INTO members (id, name, role, color, avatar, created_at, updated_at, rev) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&name)
+    .bind(db::role_str(req.role))
+    .bind(&req.color)
+    .bind(&req.avatar)
+    .bind(now)
+    .bind(now)
+    .bind(rev)
         .execute(&mut *tx)
         .await?;
     // Everyone is in the family chat.
@@ -86,10 +90,11 @@ pub async fn update(
         member.avatar = avatar;
     }
     let rev = db::next_rev(&mut tx).await?;
-    sqlx::query("UPDATE members SET name = ?, color = ?, avatar = ?, rev = ? WHERE id = ?")
+    sqlx::query("UPDATE members SET name = ?, color = ?, avatar = ?, updated_at = ?, rev = ? WHERE id = ?")
         .bind(&member.name)
         .bind(&member.color)
         .bind(&member.avatar)
+        .bind(now_ms())
         .bind(rev)
         .bind(&id)
         .execute(&mut *tx)
@@ -148,11 +153,17 @@ pub async fn revoke(State(hub): State<Arc<Hub>>, authed: Authed, Path(id): Path<
     if id == authed.device_id {
         return Err(ApiError::bad("You can't remove the device you're using. Do it from another parent's device."));
     }
-    let done =
-        sqlx::query("UPDATE devices SET revoked = 1 WHERE id = ? AND revoked = 0").bind(&id).execute(&hub.pool).await?;
+    let mut tx = hub.pool.begin().await?;
+    let rev = db::next_rev(&mut tx).await?;
+    let done = sqlx::query("UPDATE devices SET revoked = 1, rev = ? WHERE id = ? AND revoked = 0")
+        .bind(rev)
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
     if done.rows_affected() == 0 {
         return Err(ApiError::NotFound("No such device.".into()));
     }
+    tx.commit().await?;
     live::send(&hub, Audience::Device(id.clone()), Event::Revoked);
     log::info!("{} removed device {id}", authed.member.name);
     Ok(Json(()))

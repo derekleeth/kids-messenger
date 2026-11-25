@@ -118,14 +118,35 @@ impl Store {
         Ok(account)
     }
 
-    pub async fn rev(&self) -> AppResult<i64> {
-        Ok(self.get("rev").await?.and_then(|r| r.parse().ok()).unwrap_or(0))
+    /// How far this device has synced with hub `hub` (its ID, from `/hello`). Each hub of a family counts its changes
+    /// on its own, so there's a position for each. `None` is a hub from before 0.6, which has no ID.
+    ///
+    /// Before 0.6 a device kept one position for all; the first hub that tells its ID takes it over, since it's the
+    /// hub the device was using.
+    pub async fn rev(&self, hub: Option<&str>) -> AppResult<i64> {
+        let parse = |r: Option<String>| r.and_then(|r| r.parse().ok());
+        let Some(hub) = hub else { return Ok(parse(self.get("rev").await?).unwrap_or(0)) };
+        let key = format!("rev:{hub}");
+        if let Some(rev) = parse(self.get(&key).await?) {
+            return Ok(rev);
+        }
+        let Some(rev) = parse(self.get("rev").await?) else { return Ok(0) };
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)")
+            .bind(&key)
+            .bind(rev.to_string())
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM kv WHERE key = 'rev'").execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(rev)
     }
 
-    /// Moves the sync position forward (never back).
-    pub async fn advance_rev(&self, rev: i64) -> AppResult<()> {
-        if rev > self.rev().await? {
-            self.set("rev", &rev.to_string()).await?;
+    /// Moves the sync position with `hub` forward (never back).
+    pub async fn advance_rev(&self, hub: Option<&str>, rev: i64) -> AppResult<()> {
+        if rev > self.rev(hub).await? {
+            let key = hub.map_or_else(|| "rev".to_string(), |hub| format!("rev:{hub}"));
+            self.set(&key, &rev.to_string()).await?;
         }
         Ok(())
     }
@@ -345,6 +366,11 @@ impl Store {
         Ok(rows.iter().filter_map(|j| serde_json::from_str(j).ok()).collect())
     }
 
+    /// The notes with nothing waiting to be sent.
+    pub async fn clean_note_ids(&self) -> AppResult<Vec<String>> {
+        Ok(sqlx::query_scalar("SELECT id FROM notes WHERE dirty = 0").fetch_all(&self.pool).await?)
+    }
+
     /// Notes changed or deleted here that the hub doesn't have yet: (note, deleted).
     pub async fn dirty_notes(&self) -> AppResult<Vec<(Note, bool)>> {
         let rows: Vec<(String, i64)> =
@@ -516,8 +542,29 @@ mod tests {
     #[tokio::test]
     async fn rev_only_moves_forward() {
         let store = Store::memory().await.unwrap();
-        store.advance_rev(5).await.unwrap();
-        store.advance_rev(3).await.unwrap();
-        assert_eq!(store.rev().await.unwrap(), 5);
+        store.advance_rev(Some("home"), 5).await.unwrap();
+        store.advance_rev(Some("home"), 3).await.unwrap();
+        assert_eq!(store.rev(Some("home")).await.unwrap(), 5);
+    }
+
+    #[tokio::test]
+    async fn each_hub_has_its_own_sync_position() {
+        let store = Store::memory().await.unwrap();
+        store.advance_rev(Some("home"), 500).await.unwrap();
+        store.advance_rev(Some("travel"), 20).await.unwrap();
+        assert_eq!(store.rev(Some("home")).await.unwrap(), 500);
+        assert_eq!(store.rev(Some("travel")).await.unwrap(), 20);
+        assert_eq!(store.rev(Some("new")).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn the_position_from_before_hub_ids_goes_to_the_first_hub_with_one() {
+        let store = Store::memory().await.unwrap();
+        store.advance_rev(None, 42).await.unwrap();
+        assert_eq!(store.rev(None).await.unwrap(), 42);
+        assert_eq!(store.rev(Some("home")).await.unwrap(), 42);
+        // Taken over: another hub starts from the beginning.
+        assert_eq!(store.rev(Some("travel")).await.unwrap(), 0);
+        assert_eq!(store.rev(Some("home")).await.unwrap(), 42);
     }
 }

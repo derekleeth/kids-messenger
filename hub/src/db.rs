@@ -31,6 +31,37 @@ pub async fn open_memory() -> ApiResult<SqlitePool> {
     Ok(pool)
 }
 
+/// This hub's ID: the one it has, or a new one the first time it starts, or when its data has moved to another
+/// `origin` ([`crate::origin`]).
+pub async fn hub_id(pool: &SqlitePool, origin: &str) -> ApiResult<String> {
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT hub_id, origin FROM hub WHERE id = 1").fetch_optional(pool).await?;
+    match row {
+        Some((id, was)) if was == origin => Ok(id),
+        row => {
+            let id = ulid::Ulid::new().to_string();
+            if let Some((old, was)) = row {
+                log::info!(
+                    "this hub's data was at {was:?} and is now at {origin:?}: it's a hub of its own, {id} (was {old})"
+                );
+            }
+            sqlx::query("INSERT INTO hub (id, hub_id, origin) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET hub_id = excluded.hub_id, origin = excluded.origin")
+                .bind(&id)
+                .bind(origin)
+                .execute(pool)
+                .await?;
+            Ok(id)
+        }
+    }
+}
+
+pub async fn family_id(pool: &SqlitePool) -> ApiResult<Option<String>> {
+    Ok(sqlx::query_scalar::<_, Option<String>>("SELECT family_id FROM family WHERE id = 1")
+        .fetch_optional(pool)
+        .await?
+        .flatten())
+}
+
 pub async fn family_name(pool: &SqlitePool) -> ApiResult<Option<String>> {
     Ok(sqlx::query_scalar("SELECT name FROM family WHERE id = 1").fetch_optional(pool).await?)
 }
@@ -137,11 +168,12 @@ pub async fn message_from(conn: &mut SqliteConnection, row: MessageRow) -> ApiRe
     let (id, chat_id, sender_id, body_json, link_json, created_at, rev) = row;
     let body: MessageBody = serde_json::from_str(&body_json)?;
     let link: Option<LinkPreview> = link_json.as_deref().map(serde_json::from_str).transpose()?;
-    let reactions: Vec<(String, String)> =
-        sqlx::query_as("SELECT member_id, emoji FROM reactions WHERE message_id = ? ORDER BY member_id")
-            .bind(&id)
-            .fetch_all(conn)
-            .await?;
+    let reactions: Vec<(String, String)> = sqlx::query_as(
+        "SELECT member_id, emoji FROM reactions WHERE message_id = ? AND emoji != '' ORDER BY member_id",
+    )
+    .bind(&id)
+    .fetch_all(conn)
+    .await?;
     let reactions = reactions.into_iter().map(|(member_id, emoji)| Reaction { member_id, emoji }).collect();
     Ok(Message { id, chat_id, sender_id, body, created_at, reactions, link, rev })
 }

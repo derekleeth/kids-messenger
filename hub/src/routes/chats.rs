@@ -6,6 +6,7 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use kit_protocol::{Chat, Event, LinkPreview, MarkRead, Message, MessageBody, React, STICKERS, SendMessage};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use sqlx::SqliteConnection;
 
 use super::check_id;
@@ -43,7 +44,7 @@ pub async fn direct(
         return Ok(Json(chat));
     }
     let rev = db::next_rev(&mut tx).await?;
-    let id = ulid::Ulid::new().to_string();
+    let id = direct_chat_id(&key);
     sqlx::query("INSERT INTO chats (id, kind, direct_key, created_at, rev) VALUES (?, 'direct', ?, ?, ?)")
         .bind(&id)
         .bind(&key)
@@ -62,6 +63,15 @@ pub async fn direct(
     tx.commit().await?;
     live::send(&hub, Audience::Members(pair.to_vec()), Event::Chat { rev, chat: chat.clone() });
     Ok(Json(chat))
+}
+
+/// A 1:1 chat's ID, worked out from its two members (`key`, their sorted IDs), so two hubs that each start the same
+/// pair's chat while apart start the same chat. Chats from before 0.6 keep the random ID they have.
+pub fn direct_chat_id(key: &str) -> String {
+    let hash = Sha256::new().chain_update(b"kitchat-direct-chat\0").chain_update(key.as_bytes()).finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&hash[..16]);
+    ulid::Ulid::from_bytes(bytes).to_string()
 }
 
 async fn require_chat(conn: &mut SqliteConnection, chat_id: &str, authed: &Authed) -> ApiResult<Chat> {
@@ -207,13 +217,14 @@ pub async fn send(
         return Err(ApiError::Conflict("That message ID is taken.".into()));
     }
     let body = prepare_body(&mut tx, &authed, req.body).await?;
+    let created_at = kit_protocol::sent_at_to_keep(&req.id, req.sent_at, now_ms());
     let rev = db::next_rev(&mut tx).await?;
     sqlx::query("INSERT INTO messages (id, chat_id, sender_id, body_json, created_at, rev) VALUES (?, ?, ?, ?, ?, ?)")
         .bind(&req.id)
         .bind(&chat_id)
         .bind(&authed.member.id)
         .bind(serde_json::to_string(&body)?)
-        .bind(now_ms())
+        .bind(created_at)
         .bind(rev)
         .execute(&mut *tx)
         .await?;
@@ -313,20 +324,14 @@ pub async fn react(
     let message =
         db::message(&mut tx, &message_id).await?.ok_or_else(|| ApiError::NotFound("No such message.".into()))?;
     let chat = require_chat(&mut tx, &message.chat_id, &authed).await?;
-    if emoji.is_empty() {
-        sqlx::query("DELETE FROM reactions WHERE message_id = ? AND member_id = ?")
-            .bind(&message_id)
-            .bind(&authed.member.id)
-            .execute(&mut *tx)
-            .await?;
-    } else {
-        sqlx::query("INSERT OR REPLACE INTO reactions (message_id, member_id, emoji) VALUES (?, ?, ?)")
-            .bind(&message_id)
-            .bind(&authed.member.id)
-            .bind(&emoji)
-            .execute(&mut *tx)
-            .await?;
-    }
+    // Taking a reaction away keeps it, empty, with its time, so another hub's older copy can't bring it back.
+    sqlx::query("INSERT OR REPLACE INTO reactions (message_id, member_id, emoji, updated_at) VALUES (?, ?, ?, ?)")
+        .bind(&message_id)
+        .bind(&authed.member.id)
+        .bind(&emoji)
+        .bind(now_ms())
+        .execute(&mut *tx)
+        .await?;
     let rev = db::next_rev(&mut tx).await?;
     sqlx::query("UPDATE messages SET rev = ? WHERE id = ?").bind(rev).bind(&message_id).execute(&mut *tx).await?;
     let message =

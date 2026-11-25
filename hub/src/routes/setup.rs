@@ -21,6 +21,8 @@ pub async fn hello(State(hub): State<Arc<Hub>>) -> ApiResult<Json<Hello>> {
         protocol: PROTOCOL_VERSION,
         needs_setup: name.is_none(),
         family_name: name.unwrap_or_default(),
+        hub_id: Some(hub.hub_id.clone()),
+        family_id: db::family_id(&hub.pool).await?,
     }))
 }
 
@@ -55,8 +57,9 @@ async fn add_device(conn: &mut SqliteConnection, member_id: &str, device_name: &
     let id = ulid::Ulid::new().to_string();
     let token = random::token();
     let now = now_ms();
+    let rev = db::next_rev(&mut *conn).await?;
     sqlx::query(
-        "INSERT INTO devices (id, member_id, name, token_hash, created_at, last_seen) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO devices (id, member_id, name, token_hash, created_at, last_seen, rev) VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(member_id)
@@ -64,6 +67,7 @@ async fn add_device(conn: &mut SqliteConnection, member_id: &str, device_name: &
     .bind(random::hash_token(&token))
     .bind(now)
     .bind(now)
+    .bind(rev)
     .execute(conn)
     .await?;
     Ok((id, token))
@@ -90,20 +94,25 @@ pub async fn setup(
 
     let mut tx = hub.pool.begin().await?;
     let now = now_ms();
-    sqlx::query("INSERT INTO family (id, name, rev, created_at) VALUES (1, ?, 0, ?)")
+    sqlx::query("INSERT INTO family (id, name, rev, created_at, family_id) VALUES (1, ?, 0, ?, ?)")
         .bind(&family_name)
         .bind(now)
+        .bind(ulid::Ulid::new().to_string())
         .execute(&mut *tx)
         .await?;
     let rev = db::next_rev(&mut tx).await?;
     let member_id = ulid::Ulid::new().to_string();
-    sqlx::query("INSERT INTO members (id, name, role, color, avatar, created_at, rev) VALUES (?, ?, 'parent', 'sky', '🦁', ?, ?)")
-        .bind(&member_id)
-        .bind(&name)
-        .bind(now)
-        .bind(rev)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "INSERT INTO members (id, name, role, color, avatar, created_at, updated_at, rev)
+         VALUES (?, ?, 'parent', 'sky', '🦁', ?, ?, ?)",
+    )
+    .bind(&member_id)
+    .bind(&name)
+    .bind(now)
+    .bind(now)
+    .bind(rev)
+    .execute(&mut *tx)
+    .await?;
     let chat_id = ulid::Ulid::new().to_string();
     sqlx::query("INSERT INTO chats (id, kind, created_at, rev) VALUES (?, 'family', ?, ?)")
         .bind(&chat_id)

@@ -28,14 +28,18 @@ use crate::{Hub, now_ms};
 const UPLOAD_LIFETIME_MS: i64 = 3 * 24 * 60 * 60 * 1000;
 
 async fn add_media(hub: &Hub, id: &str, uploader: Option<&str>, kind: &str, size: u64) -> ApiResult<()> {
-    sqlx::query("INSERT INTO media (id, uploader_id, content_type, size, created_at) VALUES (?, ?, ?, ?, ?)")
+    let mut tx = hub.pool.begin().await?;
+    let rev = crate::db::next_rev(&mut tx).await?;
+    sqlx::query("INSERT INTO media (id, uploader_id, content_type, size, created_at, rev) VALUES (?, ?, ?, ?, ?, ?)")
         .bind(id)
         .bind(uploader)
         .bind(kind)
         .bind(size as i64)
         .bind(now_ms())
-        .execute(&hub.pool)
+        .bind(rev)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -136,7 +140,10 @@ pub async fn add_chunk(
 ) -> ApiResult<axum::Json<UploadState>> {
     let mut state = upload_row(&hub, &authed, &id).await?;
     if at.offset != state.received {
-        return Err(ApiError::Conflict(format!("The hub has {} bytes of this upload, not {}.", state.received, at.offset)));
+        return Err(ApiError::Conflict(format!(
+            "The hub has {} bytes of this upload, not {}.",
+            state.received, at.offset
+        )));
     }
     if state.received + body.len() as u64 > state.size {
         return Err(ApiError::bad("That's more than the file's size."));

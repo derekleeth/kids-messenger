@@ -87,6 +87,9 @@ pub struct Engine {
     client: RwLock<Option<HubClient>>,
     /// The current connection got through to the family's hub at `client`'s address.
     hub_confirmed: AtomicBool,
+    /// The ID of the hub the current connection is to (`None` for a hub from before 0.6). Changes from `/live` move
+    /// this device's sync position with that hub.
+    hub_id: Mutex<Option<String>>,
     kick: Notify,
     /// Bumped when the account changes, so a running session stops and starts again with the new one.
     generation: AtomicU64,
@@ -160,6 +163,7 @@ impl Engine {
             media_dir,
             client: RwLock::new(client),
             hub_confirmed: AtomicBool::new(false),
+            hub_id: Mutex::new(None),
             kick: Notify::new(),
             generation: AtomicU64::new(0),
             foreground: AtomicBool::new(true),
@@ -287,14 +291,15 @@ impl Engine {
     }
 
     /// Whether the hub answers at this address and knows this device.
-    async fn check_address(&self, client: &HubClient, device_id: &str, rev: i64) -> AppResult<()> {
+    async fn check_address(&self, client: &HubClient, device_id: &str) -> AppResult<()> {
         if client.needs_proof() {
             client.prove(device_id).await?;
         }
-        client.hello().await.map_err(|e| match e {
+        let hello = client.hello().await.map_err(|e| match e {
             AppError::Hub(message) => AppError::Hub(format!("{}: {message}", client.base())),
             other => other,
         })?;
+        let rev = self.store.rev(hello.hub_id.as_deref()).await?;
         client.sync(rev).await.map(|_| ())
     }
 
@@ -304,12 +309,11 @@ impl Engine {
     pub async fn set_hub_addresses(&self, urls: Vec<String>) -> AppResult<HubAddresses> {
         let mut account = self.store.account().await?.ok_or(AppError::NotEnrolled)?;
         let base = self.hub()?.with_several_addresses(urls.len() > 1);
-        let rev = self.store.rev().await?;
         let mut working = None;
         let mut unreachable = Vec::new();
         for url in &urls {
             let client = base.at(url)?;
-            match self.check_address(&client, &account.device_id, rev).await {
+            match self.check_address(&client, &account.device_id).await {
                 Ok(()) => working = working.or(Some(client)),
                 Err(AppError::Offline(_)) => unreachable.push(url.clone()),
                 Err(AppError::Revoked) => {
@@ -424,12 +428,18 @@ impl Engine {
             // Not the hub, or not there: either way, on to the next address. A stranger's answer isn't shown.
             client.prove(device_id).await.map_err(|e| AppError::Offline(e.to_string()))?;
         }
+        // Which of the family's hubs this is: the sync position is that hub's.
+        let hub_id = client.hello().await?.hub_id;
         let live = client.live().await?;
         // Subscribed first, then caught up: nothing that happens in between is missed.
-        let since = self.store.rev().await?;
+        let since = self.store.rev(hub_id.as_deref()).await?;
         let sync = client.sync(since).await?;
+        if sync.hub_id != hub_id {
+            return Err(AppError::Offline("a different hub answered at this address".into()));
+        }
         self.use_address(client, generation).await?;
-        self.apply_sync(sync, since > 0).await?;
+        *self.hub_id.lock().unwrap() = hub_id;
+        self.apply_sync(sync, since == 0).await?;
         Ok(live)
     }
 
@@ -492,7 +502,13 @@ impl Engine {
         }
     }
 
-    async fn apply_sync(&self, sync: SyncResponse, notify: bool) -> AppResult<()> {
+    /// A `/sync` answer. `full` is a first sync with this hub (`since=0`), which has every note this member can see,
+    /// so notes this device has that it doesn't have were deleted (or stopped being shared) while it synced elsewhere.
+    /// A first sync isn't news, so it doesn't notify.
+    async fn apply_sync(&self, sync: SyncResponse, full: bool) -> AppResult<()> {
+        let notify = !full;
+        let on_hub: std::collections::HashSet<String> =
+            if full { sync.notes.iter().map(|n| n.id.clone()).collect() } else { Default::default() };
         let mut delta = Delta::default();
         if let (Some(me), Some(mut account)) = (sync.me.clone(), self.store.account().await?) {
             account.me = me;
@@ -518,11 +534,16 @@ impl Engine {
                 delta.notes.push(note);
             }
         }
-        for id in &sync.deleted_notes {
+        let mut deleted_notes = sync.deleted_notes;
+        if full {
+            let gone = self.store.clean_note_ids().await?.into_iter().filter(|id| !on_hub.contains(id));
+            deleted_notes.extend(gone);
+        }
+        for id in &deleted_notes {
             self.store.remove_note(id).await?;
         }
-        delta.deleted_notes = sync.deleted_notes;
-        self.store.advance_rev(sync.rev).await?;
+        delta.deleted_notes = deleted_notes;
+        self.store.advance_rev(sync.hub_id.as_deref(), sync.rev).await?;
         self.emit(delta);
         if notify {
             self.notify_about(&fresh).await;
@@ -570,7 +591,8 @@ impl Engine {
             }
             Event::Revoked => return Err(AppError::Revoked),
         };
-        self.store.advance_rev(rev).await?;
+        let hub_id = self.hub_id.lock().unwrap().clone();
+        self.store.advance_rev(hub_id.as_deref(), rev).await?;
         self.emit(delta);
         Ok(())
     }
@@ -589,7 +611,8 @@ impl Engine {
                 continue;
             }
             let body = entry.body;
-            match client.send_message(&entry.chat_id, &SendMessage { id: entry.id.clone(), body }).await {
+            let send = SendMessage { id: entry.id.clone(), body, sent_at: Some(entry.created_at) };
+            match client.send_message(&entry.chat_id, &send).await {
                 Ok(message) => {
                     self.store.remove_outbox(&entry.id).await?;
                     self.store.put_message(&message).await?;

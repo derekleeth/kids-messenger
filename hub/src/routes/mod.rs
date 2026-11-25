@@ -7,6 +7,8 @@ mod sync;
 
 use std::sync::Arc;
 
+pub use chats::direct_chat_id;
+
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, patch, post, put};
