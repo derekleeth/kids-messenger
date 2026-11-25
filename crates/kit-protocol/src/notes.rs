@@ -426,6 +426,16 @@ mod tests {
     }
 
     #[test]
+    fn a_preview_one_hub_fetched_is_kept_whichever_copy_comes_first() {
+        // The hub adds a preview without changing the line's time, so the other hub's copy is as new, without one.
+        let plain = note(vec![block("a", "https://lego.com/set", 3)]);
+        let mut with_preview = plain.clone();
+        with_preview.blocks[0].link = Some(preview_of("https://lego.com/set"));
+        assert_eq!(merge_copies(&plain, &with_preview), with_preview);
+        assert_eq!(merge_copies(&with_preview, &plain), with_preview);
+    }
+
+    #[test]
     fn preview_skips_deleted_and_orders_by_position() {
         let mut first = block("z", "first", 1);
         first.pos = 0.5;
