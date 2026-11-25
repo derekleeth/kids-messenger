@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { fitWithin } from "./images";
-import { applyDelta, emptyState, mergeMessages, unreadCount } from "./state";
+import { applyDelta, emptyState, mergeMessages, readBy, unreadCount } from "./state";
 import type { Chat, Message } from "./types";
 
 function msg(id: string, createdAt: number, extra: Partial<Message> = {}): Message {
@@ -56,6 +56,13 @@ describe("state", () => {
       msg("E", 5, { pending: true }),
     ];
     expect(unreadCount(chat, list, "dad")).toBe(1);
+  });
+
+  it("knows who else has seen a message", () => {
+    expect(readBy(chat, "A", "kid")).toEqual(["dad"]);
+    expect(readBy(chat, "B", "kid")).toEqual(["dad"]);
+    expect(readBy(chat, "C", "kid")).toEqual([]);
+    expect(readBy(chat, "A", "dad")).toEqual([]); // not counting yourself
   });
 
   it("shrinks pictures keeping their shape", () => {

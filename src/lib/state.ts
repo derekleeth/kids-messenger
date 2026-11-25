@@ -117,6 +117,11 @@ export function unreadCount(chat: Chat, messages: Message[] | undefined, me: str
   return messages.filter((m) => !m.pending && m.senderId !== me && m.id > seen).length;
 }
 
+/** Who else in the chat has seen a message, by member ID. */
+export function readBy(chat: Chat, messageId: string, me: string): string[] {
+  return chat.memberIds.filter((id) => id !== me && (chat.readUpTo[id] ?? "") >= messageId);
+}
+
 /** The other person in a direct chat. */
 export function otherMember(chat: Chat, me: string): string | undefined {
   return chat.memberIds.find((id) => id !== me);

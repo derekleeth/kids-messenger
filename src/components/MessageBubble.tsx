@@ -1,18 +1,47 @@
 // One message: text with links, a photo or video, a Kit sticker or a shared list, with its link preview and reactions.
 
-import { AlertCircle, Clock, ExternalLink, Film, Play, RotateCcw, SmilePlus, Trash2 } from "lucide-react";
+import {
+  AlertCircle,
+  Check,
+  CheckCheck,
+  Clock,
+  ExternalLink,
+  Film,
+  Play,
+  RotateCcw,
+  SmilePlus,
+  Trash2,
+} from "lucide-react";
 import { useState } from "react";
 import { api, errorText, openLink } from "../lib/api";
 import { timeOf } from "../lib/format";
 import { isBigEmoji, site, splitLinks } from "../lib/links";
 import { durationText, percent, useMedia, useUpload } from "../lib/media";
-import { dropMessage, memberById, setState, useAppState } from "../lib/state";
+import { dropMessage, memberById, readBy, setState, useAppState } from "../lib/state";
 import type { LinkPreview, Message } from "../lib/types";
 import { Kit, STICKER_MOOD } from "./Kit";
 import type { Viewing } from "./MediaViewer";
 import { Avatar, toast } from "./ui";
 
 export const QUICK_REACTIONS = ["❤️", "😂", "😮", "👍", "🎉", "😢"];
+
+/** One tick when it's sent, two coloured ticks once everyone else in the chat has seen it. */
+function Ticks({ seenBy, everyone }: { seenBy: string[]; everyone: number }) {
+  const members = useAppState((s) => s.members);
+  const names = seenBy.map((id) => memberById(members, id)?.name).filter(Boolean);
+  if (everyone > 0 && seenBy.length >= everyone) {
+    return (
+      <span role="img" className="text-brand" aria-label="Seen" title={`Seen by ${names.join(", ")}`}>
+        <CheckCheck size={20} strokeWidth={2.75} />
+      </span>
+    );
+  }
+  return (
+    <span role="img" aria-label="Sent" title={names.length ? `Sent · seen by ${names.join(", ")}` : "Sent"}>
+      <Check size={20} strokeWidth={2.75} />
+    </span>
+  );
+}
 
 function Linkified({ text }: { text: string }) {
   return (
@@ -164,6 +193,7 @@ export function MessageBubble({
   const body = message.body;
   const myReaction = message.reactions.find((r) => r.memberId === me)?.emoji;
   const uploaded = percent(useUpload(message.pending ? message.id : null));
+  const chat = useAppState((s) => s.chats.find((c) => c.id === message.chatId));
 
   const react = async (emoji: string) => {
     setPicking(false);
@@ -374,7 +404,10 @@ export function MessageBubble({
               <Clock size={12} /> {uploaded !== null && uploaded < 100 ? `Sending… ${uploaded}%` : "Sending…"}
             </>
           ) : (
-            <span className="opacity-0 transition group-hover:opacity-100">{timeOf(message.createdAt)}</span>
+            <>
+              <span className="opacity-0 transition group-hover:opacity-100">{timeOf(message.createdAt)}</span>
+              {mine && chat && <Ticks seenBy={readBy(chat, message.id, me)} everyone={chat.memberIds.length - 1} />}
+            </>
           )}
         </div>
       </div>

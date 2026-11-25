@@ -129,6 +129,8 @@ const messages: Message[] = [
   msg("C-DAD-SAM", "M-DAD", { kind: "text", text: "Of course buddy! After dinner 👍" }, 85),
 ];
 messages[3].reactions = [{ memberId: "M-SAM", emoji: "😂" }];
+chats[0].readUpTo = { "M-MOM": messages[3].id, "M-SAM": messages[4].id, "M-AVA": messages[4].id };
+chats[1].readUpTo = { "M-SAM": messages[6].id };
 
 function block(
   kind: Note["blocks"][number]["kind"],
@@ -290,7 +292,9 @@ function someoneReplies(chatId: string) {
         : { kind: "text", text: REPLIES[Math.floor(Math.random() * REPLIES.length)] };
     const m = msg(chatId, who, body, 0);
     messages.push(m);
-    emit({ messages: [m] });
+    // Replying means they've seen everything before it.
+    chat.readUpTo = { ...chat.readUpTo, [who]: m.id };
+    emit({ messages: [m], chats: [{ ...chat }] });
   }, 1800);
 }
 
