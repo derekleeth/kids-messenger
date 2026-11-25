@@ -49,7 +49,7 @@ Plans:
 
 - [docs/nearby_messaging_plan.md](docs/nearby_messaging_plan.md): ways to message with no internet (camping), compared.
 - [docs/multi_hub_plan.md](docs/multi_hub_plan.md): several hubs that keep each other in step, for a travel hub on
-  the router; phases 1–3 built.
+  the router; phases 1–4 built.
 
 ## Developing
 

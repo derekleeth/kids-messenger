@@ -90,7 +90,7 @@ pub async fn apply(hub: &Hub, changes: Changes) -> ApiResult<usize> {
     // Held while a hub that isn't set up becomes one, so setting it up with its code can't happen at the same time.
     let mut setup_code = hub.setup_code.lock().await;
     let mut tx = hub.pool.begin().await?;
-    let mut out = Applier::default();
+    let mut out = Applier { media_dir: hub.media_dir(), ..Default::default() };
 
     match family(&mut tx).await? {
         Some(ours) if ours.family_id != changes.family.family_id => {
@@ -153,6 +153,8 @@ struct Applier {
     /// The change number of the last member that changed: everyone gets the new list once.
     members_rev: Option<i64>,
     events: Vec<(Audience, Event)>,
+    /// Where pictures are kept, to see whether a picture's file is here already.
+    media_dir: std::path::PathBuf,
 }
 
 impl Applier {
@@ -260,8 +262,11 @@ impl Applier {
             sqlx::query_scalar("SELECT id FROM media WHERE id = ?").bind(&m.id).fetch_optional(&mut *conn).await?;
         if exists.is_none() {
             let rev = self.next_rev(conn).await?;
+            // The file follows on its own (hub_files), unless it's here already (data copied from the other hub).
+            let have_file = tokio::fs::try_exists(self.media_dir.join(&m.id)).await.unwrap_or(false);
             sqlx::query(
-                "INSERT INTO media (id, uploader_id, content_type, size, created_at, rev) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO media (id, uploader_id, content_type, size, created_at, rev, have_file, kept_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&m.id)
             .bind(&m.uploader_id)
@@ -269,6 +274,8 @@ impl Applier {
             .bind(m.size as i64)
             .bind(m.created_at)
             .bind(rev)
+            .bind(have_file)
+            .bind(m.created_at)
             .execute(&mut *conn)
             .await?;
         }

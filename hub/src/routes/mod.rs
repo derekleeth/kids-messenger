@@ -8,13 +8,14 @@ mod sync;
 use std::sync::Arc;
 
 pub use chats::direct_chat_id;
+pub(crate) use media::serve_media;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, patch, post, put};
 
 use crate::error::{ApiError, ApiResult};
-use crate::{Hub, live, peers};
+use crate::{Hub, hub_files, live, peers};
 
 pub fn router() -> Router<Arc<Hub>> {
     Router::new()
@@ -44,12 +45,14 @@ pub fn router() -> Router<Arc<Hub>> {
         .route("/hubs/pair", post(peers::pair))
         .route("/hubs/prove", post(peers::prove))
         .route("/hubs/changes", get(peers::changes).post(peers::take_changes))
+        .route("/hubs/files/wanted", post(hub_files::wanted))
+        .route("/hubs/files/{id}", get(hub_files::get).put(hub_files::put))
         .route("/hubs/{id}", delete(peers::remove))
         .layer(DefaultBodyLimit::max(kit_protocol::MAX_MEDIA_BYTES + 64 * 1024))
 }
 
 /// A ULID, as devices make them for messages and notes.
-fn check_id(id: &str) -> ApiResult<()> {
+pub(crate) fn check_id(id: &str) -> ApiResult<()> {
     ulid::Ulid::from_string(id).map(|_| ()).map_err(|_| ApiError::bad("That ID isn't valid."))
 }
 

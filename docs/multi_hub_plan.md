@@ -1,6 +1,7 @@
 # Plan: several hubs that keep each other in step
 
-Status: **phases 1–3 done** (pairing and keeping in step, from the command line); phase 4 next. Part of route B in [nearby_messaging_plan.md](nearby_messaging_plan.md).
+Status: **phases 1–4 done** (pairing and keeping in step, photos and videos included, from the command line); the
+app's Hubs screen (phase 5) next. Part of route B in [nearby_messaging_plan.md](nearby_messaging_plan.md).
 
 Today a family has one hub, at home or on a VPS. On a trip with no internet, a second hub on the travel router (or a
 laptop) would let everyone keep chatting, with photos and lists, over the router's Wi-Fi. Copying the home hub's data
@@ -100,8 +101,15 @@ the hub's clock: the router has no battery-backed clock and can be wrong after a
 - **Trust.** A paired hub is trusted completely: it has every message and the hashes of every device's token. Pairing
   takes a code from a parent. Home stores the shared secret only as a hash; the travel hub has to keep it as it is, so
   its data folder should be guarded like home's (it has the whole family anyway).
-- **Space.** The router doesn't need every old video: it copies every record but files only up to a limit (say the
-  last 30 days or 20 GB), and fetches older ones from home when opened, if there's internet.
+- **Space.** The router doesn't need every old video: it copies every record, but files only from the last 30 days,
+  newest first, up to 20 GB of them (`--keep-days`, `--keep-gb`). An older one is fetched from home when someone
+  opens it, if there's internet; when space runs short, the copies kept longest are deleted (home still has them).
+  Files uploaded at camp are never deleted on the router. A picture whose file isn't on a hub (yet) answers "try again
+  later" (503), which the app treats like being offline, not "gone".
+- **Files move in 2 MB pieces**, each way, so a slow campground connection that drops carries on where it stopped.
+  The travel hub sends home the files its devices uploaded (`POST /hubs/files/wanted`, then `PUT /hubs/files/{id}`)
+  and copies home's (`GET /hubs/files/{id}` with a Range). A file that fails waits for the next round without
+  holding up messages.
 - **Only the travel hub calls.** Home lists the travel hub (`GET /hubs`) but never calls it, and keeps no positions
   for it; a home hub on a VPS or behind Tailscale works the same.
 - **Changes go back once.** Rows the travel hub takes in from home take its own change numbers, so it sends them back;
@@ -151,8 +159,9 @@ of flash (mostly the firmware), a USB 3.0 port, and GL.iNet's firmware built on 
 | 1. Groundwork | Hub ID and family ID in `/hello` and `/sync`; the app keeping a sync position per hub; `sentAt` on messages; reaction times (and removed reactions kept as empty); `updated_at` on members; 1:1 chat IDs from the member pair; change numbers on devices and media. Useful by itself, and fixes the sync-position problem of a copied hub. | 3–4 days | Built (PR #7) |
 | 2. Swapping changes | A hub-only "every change since N" endpoint, applying it with the rules above, and a test that runs two hubs side by side: write on both, swap, check they match, swap again, check nothing changes. | ~1 week | Built (PR #8) |
 | 3. Pairing and the sync loop | Hub codes, `kitchat-hub join`, the table of paired hubs, the call-home loop, and passing changes from the other hub to connected devices. | 3–4 days | Built (PR #9) |
-| 4. Photos and videos | Copying files in the background with a size limit, and fetching from the other hub when opened. | ~3 days | Next |
-| 5. App | **Family › Hubs** (each hub, last swapped, add a travel hub); hub addresses arriving with the sync. | 2–3 days | To do |
+| 4. Photos and videos | Copying files in the background with a size limit, and fetching from the other hub when opened. | ~3 days | Built |
+| 5. App | **Family › Hubs** (each hub, last swapped, add a travel hub); hub addresses arriving with the sync. | 2–3 days | Next |
 | 6. Router | The ARM build in the release workflow, and a `docs/travel_hub.md` for the Beryl 7. | 1 day | To do |
 
-After phases 1–3, text, stickers, reactions and lists work across hubs; photos come with phase 4.
+After phases 1–4, everything works across hubs: text, stickers, reactions, lists, photos and videos. Phases 5 and 6
+make it easy: pairing from the app instead of the command line, and a ready-made build for the router.

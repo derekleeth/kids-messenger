@@ -1,4 +1,5 @@
-//! `kitchat-hub [--data DIR] [--port N] [--bind ADDR] [--no-previews] [--trust-proxy] [--rate-limit-scale X]`
+//! `kitchat-hub [--data DIR] [--port N] [--bind ADDR] [--no-previews] [--trust-proxy] [--rate-limit-scale X]
+//! [--keep-days N] [--keep-gb N]`
 //!
 //! Runs the family hub. Data (the database and pictures) goes in `--data`, by default `hub-data` next to where it's
 //! started; the port is 8787. On first start it prints a setup code for the first parent to type into the app.
@@ -11,7 +12,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use kitchat_hub::{Options, app, limits, open, peers, setup_code_file};
+use kitchat_hub::{Options, app, hub_files, limits, open, peers, setup_code_file};
 
 /// Something to do instead of running the hub.
 enum Command {
@@ -31,10 +32,12 @@ struct Args {
     previews: bool,
     trust_proxy: bool,
     rate_limit_scale: f64,
+    keep_files: hub_files::Keep,
 }
 
 const USAGE: &str =
     "kitchat-hub [--data DIR] [--port N] [--bind ADDR] [--no-previews] [--trust-proxy] [--rate-limit-scale X]
+            [--keep-days N] [--keep-gb N]
 kitchat-hub pair-code [--data DIR]
 kitchat-hub join ADDRESS CODE [--name NAME] [--data DIR]
 kitchat-hub sync [--data DIR]
@@ -54,12 +57,24 @@ kitchat-hub sync [--data DIR]
                           X-Real-IP / X-Forwarded-For, only when the connection comes from loopback
                           (or KITCHAT_TRUST_PROXY=1); use with --bind 127.0.0.1
   --rate-limit-scale X    multiply the rate limits by X, e.g. 2 for twice as many requests (default: 1, or
-                          KITCHAT_RATE_LIMIT_SCALE)";
+                          KITCHAT_RATE_LIMIT_SCALE)
+  --keep-days N           on a hub that joined another: copy that hub's photos and videos from the last N days
+                          (default: 30, or KITCHAT_KEEP_DAYS); older ones are fetched when opened
+  --keep-gb N             ... and keep at most N GB of them (default: 20, or KITCHAT_KEEP_GB)";
 
 /// An on/off environment variable: set to anything but empty, `0`, `false`, `no` or `off` is on.
 fn env_flag(name: &str) -> bool {
     std::env::var(name)
         .is_ok_and(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off"))
+}
+
+fn parse_days(s: &str) -> Option<u32> {
+    s.trim().parse().ok()
+}
+
+/// Gigabytes, as bytes.
+fn parse_gb(s: &str) -> Option<u64> {
+    s.trim().parse().ok().filter(|x: &f64| x.is_finite() && *x >= 0.0).map(|gb| (gb * 1024.0 * 1024.0 * 1024.0) as u64)
 }
 
 fn parse_scale(s: &str) -> Option<f64> {
@@ -81,6 +96,16 @@ fn parse_args() -> Result<Args, String> {
             Ok(s) => parse_scale(&s).ok_or(format!("KITCHAT_RATE_LIMIT_SCALE={s} isn't a number above 0"))?,
             Err(_) => 1.0,
         },
+        keep_files: hub_files::Keep {
+            days: match std::env::var("KITCHAT_KEEP_DAYS") {
+                Ok(d) => parse_days(&d).ok_or(format!("KITCHAT_KEEP_DAYS={d} isn't a number of days"))?,
+                Err(_) => hub_files::Keep::default().days,
+            },
+            max_bytes: match std::env::var("KITCHAT_KEEP_GB") {
+                Ok(g) => parse_gb(&g).ok_or(format!("KITCHAT_KEEP_GB={g} isn't a number of GB"))?,
+                Err(_) => hub_files::Keep::default().max_bytes,
+            },
+        },
     };
     let mut it = std::env::args().skip(1).peekable();
     let mut positional = Vec::new();
@@ -97,6 +122,13 @@ fn parse_args() -> Result<Args, String> {
             "--rate-limit-scale" => {
                 args.rate_limit_scale =
                     it.next().as_deref().and_then(parse_scale).ok_or("--rate-limit-scale needs a number above 0")?
+            }
+            "--keep-days" => {
+                args.keep_files.days = it.next().as_deref().and_then(parse_days).ok_or("--keep-days needs a number")?
+            }
+            "--keep-gb" => {
+                args.keep_files.max_bytes =
+                    it.next().as_deref().and_then(parse_gb).ok_or("--keep-gb needs a number of GB")?
             }
             "-h" | "--help" => return Err(USAGE.into()),
             other if !other.starts_with('-') && command.is_some() => positional.push(other.to_string()),
@@ -204,6 +236,7 @@ async fn main() {
         data_dir: args.data.clone(),
         previews: args.previews,
         limits: limits::Config { trust_proxy: args.trust_proxy, scale: args.rate_limit_scale },
+        keep_files: args.keep_files,
     };
     let hub = match open(options).await {
         Ok(hub) => hub,
