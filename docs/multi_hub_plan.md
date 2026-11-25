@@ -76,7 +76,7 @@ nothing takes no new change number, so a hub sending back what it was just sent 
 | Chat members | Combined. |
 | Devices | Combined. **Removed stays removed**: a device removed on either hub is removed on all. `last_seen` is the later. |
 | 1:1 chats | Their ID is worked out from the two member IDs, so two hubs that each made the same pair's chat while apart made the same chat. |
-| Photos and videos | The record is copied straight away. The file is copied in the background, newest first, up to a size limit; a hub without a file fetches it from the other when someone opens it. |
+| Photos and videos | The record is copied straight away. The file is copied in the background, newest first, up to a size limit; a hub without a file fetches it from the other when someone opens it. A checksum the record lacked is filled in. |
 | Family name | Newest edit wins. |
 | Join codes, uploads in progress, rate limits | Stay on the hub they're on. |
 
@@ -110,6 +110,10 @@ the hub's clock: the router has no battery-backed clock and can be wrong after a
   The travel hub sends home the files its devices uploaded (`POST /hubs/files/wanted`, then `PUT /hubs/files/{id}`)
   and copies home's (`GET /hubs/files/{id}` with a Range). A file that fails waits for the next round without
   holding up messages.
+- **Every file has a checksum.** The hub a picture is uploaded to works out the SHA-256 of the file it keeps, and the
+  record carries it to the other hubs. A hub taking in a copy checks it before keeping it; a damaged copy is thrown
+  away and not tried again in the background for a day (opening the picture still tries). Pictures from before
+  checksums get theirs when their hub starts, and pass them on with the next changes.
 - **Only the travel hub calls.** Home lists the travel hub (`GET /hubs`) but never calls it, and keeps no positions
   for it; a home hub on a VPS or behind Tailscale works the same.
 - **Changes go back once.** Rows the travel hub takes in from home take its own change numbers, so it sends them back;

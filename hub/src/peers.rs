@@ -338,6 +338,7 @@ impl Remote {
         let why = serde_json::from_slice::<ErrorBody>(&bytes).map(|b| b.error).unwrap_or_else(|_| status.to_string());
         match status.as_u16() {
             401 => ApiError::Internal(format!("{} doesn't know this hub any more: pair them again ({why})", self.base)),
+            400 => ApiError::BadRequest(why),
             404 => ApiError::NotFound(why),
             409 => ApiError::Conflict(why),
             503 => ApiError::Unavailable(why),

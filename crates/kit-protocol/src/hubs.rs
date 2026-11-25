@@ -118,6 +118,10 @@ pub struct MediaRecord {
     pub content_type: String,
     pub size: u64,
     pub created_at: i64,
+    /// SHA-256 of the file, in hex, so a hub copying it can tell it arrived whole. Missing for a picture whose hub
+    /// hasn't worked it out yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 /// Whether `a` is the newer of two versions of something. Equal times are settled by content, so every hub picks the

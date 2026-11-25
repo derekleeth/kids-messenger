@@ -9,10 +9,14 @@
 //! space runs short the copies kept longest go first (home still has them). Files uploaded to the travel hub itself
 //! are never deleted.
 //!
+//! Each picture's record carries a SHA-256 of its file, worked out by the hub it was uploaded to. A hub taking in a
+//! copy checks it before keeping it; one that comes out wrong is thrown away, and not tried again in the background
+//! for a day.
+//!
 //! A hub serving a picture whose file it doesn't have yet answers 503, which the app treats as "try again later".
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,6 +26,7 @@ use axum::extract::{Path, Query, Request, State};
 use axum::response::Response;
 use kit_protocol::hubs::{FileProgress, FilesWanted, WantedFiles};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::error::{ApiError, ApiResult};
@@ -49,6 +54,63 @@ impl Default for Keep {
     fn default() -> Self {
         Keep { days: 30, max_bytes: 20 * 1024 * 1024 * 1024 }
     }
+}
+
+/// SHA-256 of a picture's bytes, in hex.
+pub fn sha256(bytes: &[u8]) -> String {
+    kit_protocol::proof::hex(&Sha256::digest(bytes))
+}
+
+/// SHA-256 of a file, in hex, read a piece at a time (a video can be a gigabyte).
+pub async fn sha256_file(path: &FsPath) -> ApiResult<String> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || -> std::io::Result<String> {
+        use std::io::Read;
+        let mut file = std::fs::File::open(path)?;
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; 1024 * 1024];
+        loop {
+            let n = file.read(&mut buf)?;
+            if n == 0 {
+                return Ok(kit_protocol::proof::hex(&hasher.finalize()));
+            }
+            hasher.update(&buf[..n]);
+        }
+    })
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?
+    .map_err(ApiError::from)
+}
+
+/// Works out the checksums of pictures from before they had one, for the files this hub has, so they reach the other
+/// hubs with the next changes. Returns how many it filled in.
+pub async fn fill_in_checksums(hub: &Hub) -> ApiResult<usize> {
+    let ids: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM media WHERE sha256 IS NULL AND have_file = 1").fetch_all(&hub.pool).await?;
+    let mut filled = 0;
+    for id in ids {
+        let sum = match sha256_file(&hub.media_dir().join(&id)).await {
+            Ok(sum) => sum,
+            Err(e) => {
+                log::warn!("couldn't read picture {id} for its checksum: {e}");
+                continue;
+            }
+        };
+        let mut tx = hub.pool.begin().await?;
+        let rev = crate::db::next_rev(&mut tx).await?;
+        sqlx::query("UPDATE media SET sha256 = ?, rev = ? WHERE id = ? AND sha256 IS NULL")
+            .bind(&sum)
+            .bind(rev)
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        filled += 1;
+    }
+    if filled > 0 {
+        log::info!("worked out the checksums of {filled} older pictures and videos");
+    }
+    Ok(filled)
 }
 
 /// A lock for each file being fetched or delivered, by its part file.
@@ -98,15 +160,35 @@ async fn record(hub: &Hub, id: &str) -> ApiResult<Option<(u64, bool)>> {
     Ok(row.map(|(size, have)| (size as u64, have)))
 }
 
-/// Makes a whole part file this picture's file.
+/// Makes a whole part file this picture's file, if it matches the picture's checksum. One that doesn't is thrown
+/// away (`BadRequest`) and not tried again in the background for a day.
 async fn finish(hub: &Hub, id: &str, copied: bool, kept_at: i64) -> ApiResult<()> {
-    tokio::fs::rename(part_path(hub, id), hub.media_dir().join(id)).await?;
-    sqlx::query("UPDATE media SET have_file = 1, copied = ?, kept_at = ? WHERE id = ?")
-        .bind(copied)
-        .bind(kept_at)
-        .bind(id)
-        .execute(&hub.pool)
-        .await?;
+    let part = part_path(hub, id);
+    let expected: Option<String> =
+        sqlx::query_scalar("SELECT sha256 FROM media WHERE id = ?").bind(id).fetch_one(&hub.pool).await?;
+    let sum = sha256_file(&part).await?;
+    if expected.as_ref().is_some_and(|expected| *expected != sum) {
+        let _ = tokio::fs::remove_file(&part).await;
+        failed(hub, id).await?;
+        return Err(ApiError::bad(format!("Picture {id} arrived damaged (its checksum doesn't match).")));
+    }
+    tokio::fs::rename(&part, hub.media_dir().join(id)).await?;
+    sqlx::query(
+        "UPDATE media SET have_file = 1, copied = ?, kept_at = ?, sha256 = COALESCE(sha256, ?), copy_failed_at = 0
+         WHERE id = ?",
+    )
+    .bind(copied)
+    .bind(kept_at)
+    .bind(&sum)
+    .bind(id)
+    .execute(&hub.pool)
+    .await?;
+    Ok(())
+}
+
+/// Notes that copying a file came out wrong, so the background rounds leave it for a day.
+async fn failed(hub: &Hub, id: &str) -> ApiResult<()> {
+    sqlx::query("UPDATE media SET copy_failed_at = ? WHERE id = ?").bind(now_ms()).bind(id).execute(&hub.pool).await?;
     Ok(())
 }
 
@@ -211,10 +293,11 @@ pub(crate) async fn copy_files(hub: &Hub, remote: &Remote, peer: &Dialed) -> Api
 
 async fn send_files(hub: &Hub, remote: &Remote, peer: &Dialed) -> ApiResult<usize> {
     let ids: Vec<String> = sqlx::query_scalar(
-        "SELECT id FROM media WHERE have_file = 1 AND copied = 0
+        "SELECT id FROM media WHERE have_file = 1 AND copied = 0 AND copy_failed_at < ?
            AND id NOT IN (SELECT media_id FROM peer_files WHERE hub_id = ?)
          ORDER BY created_at LIMIT ?",
     )
+    .bind(now_ms() - DAY_MS)
     .bind(&peer.hub_id)
     .bind(ROUND)
     .fetch_all(&hub.pool)
@@ -233,6 +316,11 @@ async fn send_files(hub: &Hub, remote: &Remote, peer: &Dialed) -> ApiResult<usiz
                 Ok(()) => sent += 1,
                 // Its record went missing there, or it was changed meanwhile: next round.
                 Err(ApiError::NotFound(_) | ApiError::Conflict(_)) => continue,
+                Err(ApiError::BadRequest(why)) => {
+                    log::warn!("{} didn't take picture {id}: {why}", remote.base);
+                    failed(hub, id).await?;
+                    continue;
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -271,9 +359,11 @@ async fn send_file(hub: &Hub, remote: &Remote, id: &str, received: u64) -> ApiRe
 async fn fetch_files(hub: &Hub, remote: &Remote) -> ApiResult<usize> {
     let keep = hub.keep_files;
     let rows: Vec<(String, i64, i64)> = sqlx::query_as(
-        "SELECT id, size, created_at FROM media WHERE have_file = 0 AND created_at >= ? ORDER BY created_at DESC LIMIT ?",
+        "SELECT id, size, created_at FROM media WHERE have_file = 0 AND created_at >= ? AND copy_failed_at < ?
+         ORDER BY created_at DESC LIMIT ?",
     )
     .bind(now_ms() - i64::from(keep.days) * DAY_MS)
+    .bind(now_ms() - DAY_MS)
     .bind(ROUND)
     .fetch_all(&hub.pool)
     .await?;
@@ -287,6 +377,7 @@ async fn fetch_files(hub: &Hub, remote: &Remote) -> ApiResult<usize> {
             Ok(false) => {}
             // The other hub doesn't have it either, yet.
             Err(ApiError::NotFound(_) | ApiError::Unavailable(_)) => {}
+            Err(ApiError::BadRequest(why)) => log::warn!("from {}: {why}", remote.base),
             Err(e) => return Err(e),
         }
     }

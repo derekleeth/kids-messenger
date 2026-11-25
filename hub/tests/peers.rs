@@ -465,3 +465,76 @@ async fn only_the_paired_hub_gets_or_sends_files() {
     let res = home.app.clone().oneshot(request("GET", &path, auth, Vec::new())).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 }
+
+async fn checksum(h: &TestHub, id: &str) -> Option<String> {
+    sqlx::query_scalar("SELECT sha256 FROM media WHERE id = ?").bind(id).fetch_one(&h.hub.pool).await.unwrap()
+}
+
+/// Spoils a file on disk without changing its size, as a bad disk or connection might.
+fn damage(h: &TestHub, id: &str) {
+    let path = h.hub.media_dir().join(id);
+    let mut bytes = std::fs::read(&path).unwrap();
+    let middle = bytes.len() / 2;
+    bytes[middle] ^= 0x55;
+    std::fs::write(path, bytes).unwrap();
+}
+
+#[tokio::test]
+async fn each_picture_carries_the_checksum_of_its_file() {
+    let (home, travel, parent) = paired().await;
+    let bytes = picture(2 * PIECE as usize + 7, 9);
+    let id = upload(&home.app, &parent, bytes.clone()).await;
+    let expected = kitchat_hub::hub_files::sha256(&bytes);
+    assert_eq!(checksum(&home, &id).await.as_deref(), Some(expected.as_str()));
+    peers::sync_once(&travel.hub).await.unwrap();
+    assert_eq!(checksum(&travel, &id).await.as_deref(), Some(expected.as_str()));
+    assert!(has_file(&travel, &id).await);
+}
+
+#[tokio::test]
+async fn a_file_that_arrives_damaged_is_not_kept_or_fetched_again_and_again() {
+    let (home, travel, parent) = paired().await;
+    let id = upload(&home.app, &parent, picture(PIECE as usize + 500, 10)).await;
+    damage(&home, &id);
+
+    peers::sync_once(&travel.hub).await.unwrap();
+    assert!(!has_file(&travel, &id).await);
+    assert!(!travel.hub.uploads_dir().join(format!("hub-{id}")).exists(), "the damaged copy is thrown away");
+    // The background rounds leave it for a while.
+    assert_eq!(peers::sync_once(&travel.hub).await.unwrap(), 0);
+    // Opening it still tries, and still won't show a damaged file.
+    let (status, _) = download(&travel.app, &parent, &id).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn home_refuses_a_damaged_file_from_the_travel_hub() {
+    let (home, travel, parent) = paired().await;
+    let id = upload(&travel.app, &parent, picture(3000, 11)).await;
+    damage(&travel, &id);
+
+    peers::sync_once(&travel.hub).await.unwrap();
+    assert!(!has_file(&home, &id).await);
+    assert!(!home.hub.uploads_dir().join(format!("hub-{id}")).exists());
+    assert_eq!(peers::sync_once(&travel.hub).await.unwrap(), 0, "not sent again straight away");
+}
+
+#[tokio::test]
+async fn pictures_from_before_checksums_get_theirs_and_pass_them_on() {
+    let (home, travel, parent) = paired().await;
+    let bytes = picture(3000, 12);
+    let id = upload(&home.app, &parent, bytes.clone()).await;
+    sqlx::query("UPDATE media SET sha256 = NULL").execute(&home.hub.pool).await.unwrap();
+    let expected = kitchat_hub::hub_files::sha256(&bytes);
+    peers::sync_once(&travel.hub).await.unwrap();
+    // Without one, a copy is still kept (the size is all there is to check), and notes the checksum of what came.
+    assert!(has_file(&travel, &id).await);
+    assert_eq!(checksum(&travel, &id).await.as_deref(), Some(expected.as_str()));
+
+    assert_eq!(kitchat_hub::hub_files::fill_in_checksums(&home.hub).await.unwrap(), 1);
+    assert_eq!(kitchat_hub::hub_files::fill_in_checksums(&home.hub).await.unwrap(), 0);
+    assert_eq!(checksum(&home, &id).await.as_deref(), Some(expected.as_str()));
+    peers::sync_once(&travel.hub).await.unwrap();
+    // And nothing more after that, either way.
+    assert_eq!(peers::sync_once(&travel.hub).await.unwrap(), 0);
+}

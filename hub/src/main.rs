@@ -295,6 +295,14 @@ async fn main() {
         args.rate_limit_scale,
         if args.previews { "on" } else { "off" },
     );
+    {
+        let hub = hub.clone();
+        tokio::spawn(async move {
+            if let Err(e) = hub_files::fill_in_checksums(&hub).await {
+                log::warn!("couldn't work out the checksums of older pictures: {e}");
+            }
+        });
+    }
     peers::spawn(hub.clone());
     let stopping = hub.stopping.clone();
     let shutdown = async move {
