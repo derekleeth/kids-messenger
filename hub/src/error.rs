@@ -21,6 +21,9 @@ pub enum ApiError {
     /// Too many requests; try again after this long (sent as `Retry-After`).
     #[error("The family hub is busy with too many requests. Try again in a moment.")]
     RateLimited(std::time::Duration),
+    /// Not here right now, but should be later (a picture still on another of the family's hubs).
+    #[error("{0}")]
+    Unavailable(String),
     #[error("database: {0}")]
     Db(#[from] sqlx::Error),
     #[error("database setup: {0}")]
@@ -48,6 +51,7 @@ impl ApiError {
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::TooManyAttempts | Self::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
+            Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

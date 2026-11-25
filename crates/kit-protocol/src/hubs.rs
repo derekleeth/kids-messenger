@@ -118,6 +118,10 @@ pub struct MediaRecord {
     pub content_type: String,
     pub size: u64,
     pub created_at: i64,
+    /// SHA-256 of the file, in hex, so a hub copying it can tell it arrived whole. Missing for a picture whose hub
+    /// hasn't worked it out yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 /// Whether `a` is the newer of two versions of something. Equal times are settled by content, so every hub picks the
@@ -190,4 +194,29 @@ pub struct PeerInfo {
     pub url: Option<String>,
     /// When the two last swapped changes. 0: not yet.
     pub last_synced: i64,
+}
+
+/// `POST /hubs/files/wanted`: which of these pictures and videos the other hub still needs the file for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilesWanted {
+    pub ids: Vec<String>,
+}
+
+/// The answer to [`FilesWanted`]. IDs in neither list are files the hub already has.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WantedFiles {
+    /// Files it needs, with how much of each it already has.
+    pub wanted: Vec<FileProgress>,
+    /// Pictures it hasn't heard of yet (their records haven't arrived): ask again later.
+    pub unknown: Vec<String>,
+}
+
+/// How much of a file a hub has (`PUT /hubs/files/{id}` answers with it too).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileProgress {
+    pub id: String,
+    pub received: u64,
 }

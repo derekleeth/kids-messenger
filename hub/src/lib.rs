@@ -8,6 +8,7 @@
 pub mod auth;
 pub mod db;
 pub mod error;
+pub mod hub_files;
 pub mod limits;
 pub mod live;
 pub mod peers;
@@ -42,6 +43,8 @@ pub struct Hub {
     pub limits: Arc<limits::Limits>,
     /// Set to true when the hub is shutting down, so `/live` sockets close.
     pub stopping: watch::Sender<bool>,
+    /// Which of other hubs' pictures and videos this hub keeps copies of ([`hub_files`]).
+    pub keep_files: hub_files::Keep,
 }
 
 impl Hub {
@@ -58,6 +61,7 @@ pub struct Options {
     pub data_dir: PathBuf,
     pub previews: bool,
     pub limits: limits::Config,
+    pub keep_files: hub_files::Keep,
 }
 
 /// Opens (or creates) the hub's database in `data_dir` and gets it ready to serve.
@@ -80,6 +84,7 @@ pub async fn open(options: Options) -> Result<Arc<Hub>, error::ApiError> {
         recent_previews: preview::Recent::default(),
         limits: Arc::new(limits::Limits::new(options.limits)),
         stopping: watch::Sender::new(false),
+        keep_files: options.keep_files,
     }))
 }
 
@@ -137,5 +142,6 @@ pub async fn open_in_memory_with(data_dir: PathBuf, limits: limits::Config) -> R
         recent_previews: preview::Recent::default(),
         limits: Arc::new(limits::Limits::new(limits)),
         stopping: watch::Sender::new(false),
+        keep_files: hub_files::Keep::default(),
     }))
 }

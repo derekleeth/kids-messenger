@@ -301,9 +301,10 @@ fn is_open_path(path: &str) -> bool {
     matches!(path, "/hello" | "/setup" | "/enroll" | "/prove" | "/hubs/pair" | "/hubs/prove")
 }
 
-/// Paths that may take longer than [`REQUEST_TIMEOUT`]: the live socket and pictures and videos going up or down.
+/// Paths that may take longer than [`REQUEST_TIMEOUT`]: the live socket and pictures and videos going up or down
+/// (between hubs too).
 fn is_long_path(path: &str) -> bool {
-    path == "/live" || path == "/media" || path.starts_with("/media/")
+    path == "/live" || path == "/media" || path.starts_with("/media/") || path.starts_with("/hubs/files/")
 }
 
 /// The middleware in front of every route: works out the client's address, applies the per-address limits, the

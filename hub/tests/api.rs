@@ -704,8 +704,14 @@ async fn hello_and_sync_say_which_hub_and_family() {
 #[tokio::test]
 async fn a_hub_keeps_its_id_and_a_copy_of_its_data_gets_its_own() {
     let dir = temp_dir();
-    let open =
-        |data_dir| kitchat_hub::open(kitchat_hub::Options { data_dir, previews: false, limits: Config::default() });
+    let open = |data_dir| {
+        kitchat_hub::open(kitchat_hub::Options {
+            data_dir,
+            previews: false,
+            limits: Config::default(),
+            keep_files: Default::default(),
+        })
+    };
     let (home, copy) = (dir.0.join("home"), dir.0.join("copy"));
     let hub = open(home.clone()).await.unwrap();
     let id = hub.hub_id.clone();

@@ -38,6 +38,8 @@ Options:
 | `--no-previews`        | previews on (KITCHAT_NO_PREVIEWS=1 turns them off) | Don't fetch link previews (titles and pictures for links in chats and lists). |
 | `--trust-proxy`        | off (KITCHAT_TRUST_PROXY=1)   | The hub is behind a reverse proxy on the same computer (nginx): take each device's address from `X-Real-IP` (or the last `X-Forwarded-For`), but only from connections that come from `127.0.0.1`/`::1`. Use it with `--bind 127.0.0.1`; the hub warns if you don't. |
 | `--rate-limit-scale X` | `1` (KITCHAT_RATE_LIMIT_SCALE) | Multiplies the rate limits below, e.g. `2` for twice as many requests. |
+| `--keep-days N`        | `30` (KITCHAT_KEEP_DAYS)       | On a hub that joined another (§6): copy that hub's photos and videos from the last N days. Older ones are fetched when opened. |
+| `--keep-gb N`          | `20` (KITCHAT_KEEP_GB)         | ... and keep at most N GB of them; the copies kept longest are deleted first. |
 
 A flag wins over its environment variable.
 
@@ -164,7 +166,12 @@ kitchat-hub --data ./hub-data join <this hub's address> CODE --name "Beryl"
 
 The address is the one the travel hub can reach: `https://` for a VPS or tunnel, or `192.168.1.20:8787` while it's on
 the home network. Then start the travel hub as usual; devices add it as one more hub address. `kitchat-hub sync` swaps
-changes once by hand. Photos don't copy between hubs yet. More in [multi_hub_plan.md](multi_hub_plan.md).
+changes once by hand.
+
+Photos and videos copy too: the travel hub sends home what was uploaded at camp, and keeps copies of home's from the
+last 30 days, up to 20 GB (`--keep-days`, `--keep-gb`). Older ones are fetched from home when someone opens them, if
+the router has internet; until then the app can't open them, as when it's offline. More in
+[multi_hub_plan.md](multi_hub_plan.md).
 
 ## Trouble?
 

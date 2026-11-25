@@ -31,7 +31,7 @@ use tokio::sync::broadcast;
 use crate::auth::Authed;
 use crate::error::{ApiError, ApiResult};
 use crate::limits::{ClientIp, is_home_or_tailnet};
-use crate::{Hub, db, now_ms, random, replica};
+use crate::{Hub, db, hub_files, now_ms, random, replica};
 
 /// How long a hub code works.
 const CODE_LIFETIME_MS: i64 = 10 * 60 * 1000;
@@ -39,6 +39,8 @@ const CODE_LIFETIME_MS: i64 = 10 * 60 * 1000;
 pub const WAIT: Duration = Duration::from_secs(20);
 /// How often the travel hub sends its changes even when it hasn't noticed any.
 const PUSH_AT_LEAST_EVERY: Duration = Duration::from_secs(60);
+/// How often the travel hub looks for pictures and videos to move, when there were none last time.
+const FILES_EVERY: Duration = Duration::from_secs(10);
 const FIRST_RETRY: Duration = Duration::from_secs(2);
 const LONGEST_RETRY: Duration = Duration::from_secs(60);
 
@@ -90,6 +92,7 @@ pub async fn list(State(hub): State<Arc<Hub>>, authed: Authed) -> ApiResult<Json
 pub async fn remove(State(hub): State<Arc<Hub>>, authed: Authed, Path(id): Path<String>) -> ApiResult<Json<()>> {
     authed.require_parent()?;
     let done = sqlx::query("DELETE FROM peers WHERE hub_id = ?").bind(&id).execute(&hub.pool).await?;
+    sqlx::query("DELETE FROM peer_files WHERE hub_id = ?").bind(&id).execute(&hub.pool).await?;
     if done.rows_affected() == 0 {
         return Err(ApiError::NotFound("This hub doesn't know that hub.".into()));
     }
@@ -306,49 +309,64 @@ fn http() -> ApiResult<reqwest::Client> {
 }
 
 /// The other hub, as seen from the hub that calls it.
-struct Remote {
+pub(crate) struct Remote {
     http: reqwest::Client,
-    base: String,
+    pub(crate) base: String,
     /// "Hub <this hub's ID>:<secret>", or nothing before pairing.
     auth: Option<String>,
 }
 
 impl Remote {
-    async fn send<T: DeserializeOwned>(&self, req: reqwest::RequestBuilder) -> ApiResult<T> {
-        let req = match &self.auth {
+    /// A request to `path` on the other hub, signed in as this hub once paired.
+    pub(crate) fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        let req = self.http.request(method, format!("{}{path}", self.base));
+        match &self.auth {
             Some(auth) => req.header(reqwest::header::AUTHORIZATION, auth),
             None => req,
-        };
-        let res = req.send().await.map_err(|e| ApiError::Internal(format!("couldn't reach {}: {e}", self.base)))?;
-        let status = res.status();
-        let bytes = res.bytes().await.map_err(|e| ApiError::Internal(format!("{}: {e}", self.base)))?;
-        if !status.is_success() {
-            let why =
-                serde_json::from_slice::<ErrorBody>(&bytes).map(|b| b.error).unwrap_or_else(|_| status.to_string());
-            return Err(match status.as_u16() {
-                401 => {
-                    ApiError::Internal(format!("{} doesn't know this hub any more: pair them again ({why})", self.base))
-                }
-                409 => ApiError::Conflict(why),
-                _ => ApiError::Internal(format!("{}: {why}", self.base)),
-            });
         }
+    }
+
+    pub(crate) async fn send_raw(&self, req: reqwest::RequestBuilder) -> ApiResult<reqwest::Response> {
+        req.send().await.map_err(|e| ApiError::Internal(format!("couldn't reach {}: {e}", self.base)))
+    }
+
+    /// What went wrong, from an answer that isn't a success: "not here" and "not yet" stay `NotFound` and
+    /// `Unavailable`, so the caller can skip a file and carry on.
+    pub(crate) async fn error(&self, res: reqwest::Response) -> ApiError {
+        let status = res.status();
+        let bytes = res.bytes().await.unwrap_or_default();
+        let why = serde_json::from_slice::<ErrorBody>(&bytes).map(|b| b.error).unwrap_or_else(|_| status.to_string());
+        match status.as_u16() {
+            401 => ApiError::Internal(format!("{} doesn't know this hub any more: pair them again ({why})", self.base)),
+            400 => ApiError::BadRequest(why),
+            404 => ApiError::NotFound(why),
+            409 => ApiError::Conflict(why),
+            503 => ApiError::Unavailable(why),
+            _ => ApiError::Internal(format!("{}: {why}", self.base)),
+        }
+    }
+
+    pub(crate) async fn send<T: DeserializeOwned>(&self, req: reqwest::RequestBuilder) -> ApiResult<T> {
+        let res = self.send_raw(req).await?;
+        if !res.status().is_success() {
+            return Err(self.error(res).await);
+        }
+        let bytes = res.bytes().await.map_err(|e| ApiError::Internal(format!("{}: {e}", self.base)))?;
         Ok(serde_json::from_slice(&bytes)?)
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> ApiResult<T> {
-        self.send(self.http.get(format!("{}{path}", self.base))).await
+        self.send(self.request(reqwest::Method::GET, path)).await
     }
 
-    async fn post<T: DeserializeOwned>(&self, path: &str, body: &impl serde::Serialize) -> ApiResult<T> {
+    pub(crate) async fn post<T: DeserializeOwned>(&self, path: &str, body: &impl serde::Serialize) -> ApiResult<T> {
         let body = serde_json::to_vec(body)?;
-        let req =
-            self.http.post(format!("{}{path}", self.base)).header(reqwest::header::CONTENT_TYPE, "application/json");
+        let req = self.request(reqwest::Method::POST, path).header(reqwest::header::CONTENT_TYPE, "application/json");
         self.send(req.body(body)).await
     }
 
     /// Makes sure an unencrypted address is the hub this one paired with, before anything is sent there.
-    async fn prove(&self, our_hub_id: &str, secret: &str) -> ApiResult<()> {
+    pub(crate) async fn prove(&self, our_hub_id: &str, secret: &str) -> ApiResult<()> {
         if !needs_proof(&self.base) {
             return Ok(());
         }
@@ -365,14 +383,14 @@ impl Remote {
 }
 
 /// A hub this one calls, as stored.
-struct Dialed {
-    hub_id: String,
+pub(crate) struct Dialed {
+    pub(crate) hub_id: String,
     name: String,
     url: String,
-    secret: String,
+    pub(crate) secret: String,
 }
 
-async fn dialed(hub: &Hub, hub_id: &str) -> ApiResult<Option<Dialed>> {
+pub(crate) async fn dialed(hub: &Hub, hub_id: &str) -> ApiResult<Option<Dialed>> {
     let row: Option<(String, String, String, String)> = sqlx::query_as(
         "SELECT hub_id, name, url, secret FROM peers WHERE hub_id = ? AND url IS NOT NULL AND secret IS NOT NULL",
     )
@@ -382,13 +400,13 @@ async fn dialed(hub: &Hub, hub_id: &str) -> ApiResult<Option<Dialed>> {
     Ok(row.map(|(hub_id, name, url, secret)| Dialed { hub_id, name, url, secret }))
 }
 
-async fn dialed_ids(hub: &Hub) -> ApiResult<Vec<String>> {
+pub(crate) async fn dialed_ids(hub: &Hub) -> ApiResult<Vec<String>> {
     Ok(sqlx::query_scalar("SELECT hub_id FROM peers WHERE url IS NOT NULL AND secret IS NOT NULL")
         .fetch_all(&hub.pool)
         .await?)
 }
 
-fn remote_for(hub: &Hub, peer: &Dialed) -> ApiResult<Remote> {
+pub(crate) fn remote_for(hub: &Hub, peer: &Dialed) -> ApiResult<Remote> {
     Ok(Remote { http: http()?, base: peer.url.clone(), auth: Some(format!("Hub {}:{}", hub.hub_id, peer.secret)) })
 }
 
@@ -492,7 +510,8 @@ async fn push(hub: &Hub, remote: &Remote, peer: &Dialed) -> ApiResult<usize> {
     }
 }
 
-/// Swaps changes once with every hub this one calls: everything new each way. For tests and `kitchat-hub sync`.
+/// Swaps changes once with every hub this one calls: everything new each way, and the pictures and videos to copy.
+/// Returns how many rows and files changed. For tests and `kitchat-hub sync`.
 pub async fn sync_once(hub: &Hub) -> ApiResult<usize> {
     let mut changed = 0;
     for id in dialed_ids(hub).await? {
@@ -501,6 +520,13 @@ pub async fn sync_once(hub: &Hub) -> ApiResult<usize> {
         remote.prove(&hub.hub_id, &peer.secret).await?;
         changed += pull(hub, &remote, &peer, false).await?;
         changed += push(hub, &remote, &peer).await?;
+        loop {
+            let moved = hub_files::copy_files(hub, &remote, &peer).await?;
+            if moved == 0 {
+                break;
+            }
+            changed += moved;
+        }
     }
     Ok(changed)
 }
@@ -567,8 +593,27 @@ async fn session(hub: &Hub, peer: &Dialed, retry: &mut Duration) -> ApiResult<()
     push(hub, &remote, peer).await?;
     *retry = FIRST_RETRY;
     log::info!("in step with hub \"{}\" at {}", peer.name, peer.url);
-    tokio::try_join!(keep_pulling(hub, &remote, peer), keep_pushing(hub, &remote, peer))?;
+    tokio::try_join!(
+        keep_pulling(hub, &remote, peer),
+        keep_pushing(hub, &remote, peer),
+        keep_copying(hub, &remote, peer)
+    )?;
     Ok(())
+}
+
+/// Moves pictures and videos one round after another, and looks again now and then once there's nothing to move. A
+/// file that fails waits for the next round without holding up messages: pulling and pushing notice a lost connection.
+async fn keep_copying(hub: &Hub, remote: &Remote, peer: &Dialed) -> ApiResult<()> {
+    loop {
+        match hub_files::copy_files(hub, remote, peer).await {
+            Ok(0) => tokio::time::sleep(FILES_EVERY).await,
+            Ok(_) => {}
+            Err(e) => {
+                log::warn!("pictures and videos with hub \"{}\": {e}", peer.name);
+                tokio::time::sleep(FILES_EVERY).await;
+            }
+        }
+    }
 }
 
 async fn keep_pulling(hub: &Hub, remote: &Remote, peer: &Dialed) -> ApiResult<()> {

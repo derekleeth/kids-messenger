@@ -1,8 +1,8 @@
 # Plan: messaging without internet (camping and other places with no signal)
 
 Status: **route B chosen and under way.** The travel hub, with several hubs that keep each other in step, was picked to
-start first: phases 1–3 of [multi_hub_plan.md](multi_hub_plan.md) are built (hub IDs, `sentAt`, swapping changes,
-pairing and the call-home loop). The other routes are still options to weigh, and the open questions at the end are
+start first: phases 1–4 of [multi_hub_plan.md](multi_hub_plan.md) are built (hub IDs, `sentAt`, swapping changes,
+pairing and the call-home loop, photos and videos). The other routes are still options to weigh, and the open questions at the end are
 still open.
 
 Camping, a car with no signal, a big park, a ski hill: the family is fairly close together but no device can reach the
@@ -324,8 +324,8 @@ firmware allows it.
 4. **D. Phone-to-phone Bluetooth** probably isn't needed: A covers "close together" and C covers "far apart" better.
    Look at it again only if there are often trips with no router and no radios.
 5. **B. Travel hub** with several hubs in step ([multi_hub_plan.md](multi_hub_plan.md)). Chosen to start first: its
-   phase 1 (hub IDs, a sync position per hub, `sentAt`) is groundwork the other routes share. Phases 1–3 are built;
-   photos between hubs, the app's Hubs screen and the router build are next.
+   phase 1 (hub IDs, a sync position per hub, `sentAt`) is groundwork the other routes share. Phases 1–4 are built
+   (photos and videos included); the app's Hubs screen and the router build are next.
 
 ## Open questions
 

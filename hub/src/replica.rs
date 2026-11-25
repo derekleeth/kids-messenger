@@ -90,7 +90,7 @@ pub async fn apply(hub: &Hub, changes: Changes) -> ApiResult<usize> {
     // Held while a hub that isn't set up becomes one, so setting it up with its code can't happen at the same time.
     let mut setup_code = hub.setup_code.lock().await;
     let mut tx = hub.pool.begin().await?;
-    let mut out = Applier::default();
+    let mut out = Applier { media_dir: hub.media_dir(), ..Default::default() };
 
     match family(&mut tx).await? {
         Some(ours) if ours.family_id != changes.family.family_id => {
@@ -153,6 +153,8 @@ struct Applier {
     /// The change number of the last member that changed: everyone gets the new list once.
     members_rev: Option<i64>,
     events: Vec<(Audience, Event)>,
+    /// Where pictures are kept, to see whether a picture's file is here already.
+    media_dir: std::path::PathBuf,
 }
 
 impl Applier {
@@ -256,12 +258,27 @@ impl Applier {
     }
 
     async fn media(&mut self, conn: &mut SqliteConnection, m: &MediaRecord) -> ApiResult<()> {
-        let exists: Option<String> =
-            sqlx::query_scalar("SELECT id FROM media WHERE id = ?").bind(&m.id).fetch_optional(&mut *conn).await?;
+        let exists: Option<(String, Option<String>)> =
+            sqlx::query_as("SELECT id, sha256 FROM media WHERE id = ?").bind(&m.id).fetch_optional(&mut *conn).await?;
+        if let Some((_, None)) = exists
+            && m.sha256.is_some()
+        {
+            // The hub with the file worked out its checksum after the record came here.
+            let rev = self.next_rev(conn).await?;
+            sqlx::query("UPDATE media SET sha256 = ?, rev = ? WHERE id = ?")
+                .bind(&m.sha256)
+                .bind(rev)
+                .bind(&m.id)
+                .execute(&mut *conn)
+                .await?;
+        }
         if exists.is_none() {
             let rev = self.next_rev(conn).await?;
+            // The file follows on its own (hub_files), unless it's here already (data copied from the other hub).
+            let have_file = tokio::fs::try_exists(self.media_dir.join(&m.id)).await.unwrap_or(false);
             sqlx::query(
-                "INSERT INTO media (id, uploader_id, content_type, size, created_at, rev) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO media (id, uploader_id, content_type, size, created_at, rev, have_file, kept_at, sha256)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&m.id)
             .bind(&m.uploader_id)
@@ -269,6 +286,9 @@ impl Applier {
             .bind(m.size as i64)
             .bind(m.created_at)
             .bind(rev)
+            .bind(have_file)
+            .bind(m.created_at)
+            .bind(&m.sha256)
             .execute(&mut *conn)
             .await?;
         }
@@ -608,9 +628,12 @@ async fn notes_since(conn: &mut SqliteConnection, since: i64, limit: i64) -> Api
     Ok(out)
 }
 
+/// id, uploader_id, content_type, size, created_at, rev, sha256
+type MediaRow = (String, Option<String>, String, i64, i64, i64, Option<String>);
+
 async fn media_since(conn: &mut SqliteConnection, since: i64, limit: i64) -> ApiResult<Vec<(i64, MediaRecord)>> {
-    let rows: Vec<(String, Option<String>, String, i64, i64, i64)> = sqlx::query_as(
-        "SELECT id, uploader_id, content_type, size, created_at, rev FROM media WHERE rev > ? ORDER BY rev LIMIT ?",
+    let rows: Vec<MediaRow> = sqlx::query_as(
+        "SELECT id, uploader_id, content_type, size, created_at, rev, sha256 FROM media WHERE rev > ? ORDER BY rev LIMIT ?",
     )
     .bind(since)
     .bind(limit)
@@ -618,8 +641,8 @@ async fn media_since(conn: &mut SqliteConnection, since: i64, limit: i64) -> Api
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, uploader_id, content_type, size, created_at, rev)| {
-            (rev, MediaRecord { id, uploader_id, content_type, size: size as u64, created_at })
+        .map(|(id, uploader_id, content_type, size, created_at, rev, sha256)| {
+            (rev, MediaRecord { id, uploader_id, content_type, size: size as u64, created_at, sha256 })
         })
         .collect())
 }

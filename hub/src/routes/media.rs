@@ -27,18 +27,21 @@ use crate::{Hub, now_ms};
 /// An upload nobody finished is thrown away after this long.
 const UPLOAD_LIFETIME_MS: i64 = 3 * 24 * 60 * 60 * 1000;
 
-async fn add_media(hub: &Hub, id: &str, uploader: Option<&str>, kind: &str, size: u64) -> ApiResult<()> {
+async fn add_media(hub: &Hub, id: &str, uploader: Option<&str>, kind: &str, size: u64, sha256: &str) -> ApiResult<()> {
     let mut tx = hub.pool.begin().await?;
     let rev = crate::db::next_rev(&mut tx).await?;
-    sqlx::query("INSERT INTO media (id, uploader_id, content_type, size, created_at, rev) VALUES (?, ?, ?, ?, ?, ?)")
-        .bind(id)
-        .bind(uploader)
-        .bind(kind)
-        .bind(size as i64)
-        .bind(now_ms())
-        .bind(rev)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "INSERT INTO media (id, uploader_id, content_type, size, created_at, rev, sha256) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(id)
+    .bind(uploader)
+    .bind(kind)
+    .bind(size as i64)
+    .bind(now_ms())
+    .bind(rev)
+    .bind(sha256)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(())
 }
@@ -48,7 +51,7 @@ pub async fn store(hub: &Hub, uploader: Option<&str>, bytes: Vec<u8>, kind: &str
     let bytes = media::clean_photo(&bytes);
     let id = ulid::Ulid::new().to_string();
     tokio::fs::write(hub.media_dir().join(&id), &bytes).await?;
-    add_media(hub, &id, uploader, kind, bytes.len() as u64).await?;
+    add_media(hub, &id, uploader, kind, bytes.len() as u64, &crate::hub_files::sha256(&bytes)).await?;
     Ok(id)
 }
 
@@ -196,9 +199,10 @@ pub async fn finish_upload(
         sqlx::query("DELETE FROM uploads WHERE id = ?").bind(&id).execute(&hub.pool).await?;
         return Err(ApiError::bad("Only photos (JPEG, PNG, WebP, GIF) and MP4 videos can be sent."));
     };
+    let sha256 = crate::hub_files::sha256_file(&part).await?;
     let media_id = ulid::Ulid::new().to_string();
     tokio::fs::rename(&part, hub.media_dir().join(&media_id)).await?;
-    add_media(&hub, &media_id, Some(&authed.member.id), kind, size).await?;
+    add_media(&hub, &media_id, Some(&authed.member.id), kind, size, &sha256).await?;
     sqlx::query("DELETE FROM uploads WHERE id = ?").bind(&id).execute(&hub.pool).await?;
     Ok(axum::Json(Uploaded { media_id }))
 }
@@ -212,11 +216,24 @@ pub async fn download(
     req: Request,
 ) -> ApiResult<Response> {
     super::check_id(&id)?;
+    let have: Option<bool> =
+        sqlx::query_scalar("SELECT have_file FROM media WHERE id = ?").bind(&id).fetch_optional(&hub.pool).await?;
+    // A picture from another of the family's hubs whose file hasn't come yet, or was deleted here to make room.
+    if have == Some(false) && !crate::hub_files::fetch_now(&hub, &id).await? {
+        return Err(ApiError::Unavailable(
+            "That picture is still on another of the family's hubs. Try again when they're connected.".into(),
+        ));
+    }
+    serve_media(&hub, &id, req).await
+}
+
+/// A picture's file, answering Range requests.
+pub(crate) async fn serve_media(hub: &Hub, id: &str, req: Request) -> ApiResult<Response> {
     let kind: Option<String> =
-        sqlx::query_scalar("SELECT content_type FROM media WHERE id = ?").bind(&id).fetch_optional(&hub.pool).await?;
+        sqlx::query_scalar("SELECT content_type FROM media WHERE id = ?").bind(id).fetch_optional(&hub.pool).await?;
     let gone = || ApiError::NotFound("That picture is gone.".into());
     let kind = kind.ok_or_else(gone)?;
-    let path = hub.media_dir().join(&id);
+    let path = hub.media_dir().join(id);
     if !tokio::fs::try_exists(&path).await? {
         return Err(gone());
     }

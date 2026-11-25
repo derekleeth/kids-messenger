@@ -1,4 +1,5 @@
-//! Pairing two of a family's hubs and keeping them in step over a real connection (docs/multi_hub_plan.md, phase 3).
+//! Pairing two of a family's hubs and keeping them in step over a real connection, pictures and videos included
+//! (docs/multi_hub_plan.md, phases 3 and 4).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -10,7 +11,8 @@ use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use kit_protocol::*;
-use kitchat_hub::{Hub, app, open_in_memory, peers, random};
+use kitchat_hub::hub_files::{Keep, PIECE};
+use kitchat_hub::{Hub, app, open_in_memory, peers, random, replica};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -39,10 +41,27 @@ impl Drop for TestHub {
 
 /// A hub listening on a port of its own, as a hub runs.
 async fn new_hub() -> TestHub {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let dir = temp_dir();
+    let hub = open_in_memory(dir.clone()).await.unwrap();
+    serve(hub, dir).await
+}
+
+/// A hub that keeps other hubs' files as `keep` says.
+async fn new_hub_keeping(keep: Keep) -> TestHub {
+    let dir = temp_dir();
+    let options =
+        kitchat_hub::Options { data_dir: dir.clone(), previews: false, limits: Default::default(), keep_files: keep };
+    serve(kitchat_hub::open(options).await.unwrap(), dir).await
+}
+
+fn temp_dir() -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("kitchat-peers-test-{}", ulid()));
     std::fs::create_dir_all(&dir).unwrap();
-    let hub = open_in_memory(dir.clone()).await.unwrap();
+    dir
+}
+
+async fn serve(hub: Arc<Hub>, dir: std::path::PathBuf) -> TestHub {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let service = app(hub.clone()).into_make_service_with_connect_info::<SocketAddr>();
@@ -134,7 +153,12 @@ async fn has_message(app: &Router, token: &str, id: &str) -> bool {
 
 /// Home with a family, and a new travel hub joined to it. Returns (home, travel, the parent's token).
 async fn paired() -> (TestHub, TestHub, String) {
-    let (home, travel) = (new_hub().await, new_hub().await);
+    paired_with(new_hub().await).await
+}
+
+/// Home with a family, and `travel` joined to it.
+async fn paired_with(travel: TestHub) -> (TestHub, TestHub, String) {
+    let home = new_hub().await;
     let parent = set_up(&home, "The Lynx Family").await;
     let code = hub_code(&home, &parent).await;
     peers::join(&travel.hub, &home.url, &code, "Beryl").await.unwrap();
@@ -303,4 +327,214 @@ async fn the_running_hub_keeps_in_step_by_itself() {
         assert!(Instant::now() < deadline, "the hubs didn't get in step");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// A picture the hub takes (a JPEG it can't decode is kept as it is), `len` bytes long.
+fn picture(len: usize, seed: u8) -> Vec<u8> {
+    let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x02];
+    bytes.extend((0..len - 8).map(|i| (i as u8).wrapping_mul(7).wrapping_add(seed) % 0xF0));
+    bytes.extend([0xFF, 0xD9]);
+    bytes
+}
+
+fn request(method: &str, path: &str, auth: String, body: Vec<u8>) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(path)
+        .extension(ConnectInfo("127.0.0.1:1".parse::<SocketAddr>().unwrap()))
+        .header(header::AUTHORIZATION, auth)
+        .body(Body::from(body))
+        .unwrap()
+}
+
+async fn upload(app: &Router, token: &str, bytes: Vec<u8>) -> String {
+    let res = app.clone().oneshot(request("POST", "/media", format!("Bearer {token}"), bytes)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    body["mediaId"].as_str().unwrap().to_string()
+}
+
+async fn download(app: &Router, token: &str, id: &str) -> (StatusCode, Vec<u8>) {
+    let req = request("GET", &format!("/media/{id}"), format!("Bearer {token}"), Vec::new());
+    let res = app.clone().oneshot(req).await.unwrap();
+    let status = res.status();
+    (status, res.into_body().collect().await.unwrap().to_bytes().to_vec())
+}
+
+async fn has_file(h: &TestHub, id: &str) -> bool {
+    let have: bool =
+        sqlx::query_scalar("SELECT have_file FROM media WHERE id = ?").bind(id).fetch_one(&h.hub.pool).await.unwrap();
+    have && h.hub.media_dir().join(id).exists()
+}
+
+#[tokio::test]
+async fn pictures_and_videos_go_both_ways_in_pieces() {
+    let (home, travel, parent) = paired().await;
+    let big = picture(2 * PIECE as usize + 12345, 1);
+    let small = picture(3000, 2);
+    let from_home = upload(&home.app, &parent, big.clone()).await;
+    let from_camp = upload(&travel.app, &parent, small.clone()).await;
+
+    assert!(peers::sync_once(&travel.hub).await.unwrap() > 0);
+    assert!(has_file(&travel, &from_home).await);
+    assert!(has_file(&home, &from_camp).await);
+    assert_eq!(download(&travel.app, &parent, &from_home).await, (StatusCode::OK, big));
+    assert_eq!(download(&home.app, &parent, &from_camp).await, (StatusCode::OK, small));
+    // Nothing more to move, and nothing sent back.
+    assert_eq!(peers::sync_once(&travel.hub).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn a_file_cut_off_partway_carries_on_where_it_stopped() {
+    let (home, travel, parent) = paired().await;
+    let big = picture(2 * PIECE as usize + 99, 3);
+    let id = upload(&home.app, &parent, big.clone()).await;
+    // Its record arrives, and the first piece of the file, before the connection drops.
+    let changes = replica::changes_since(&home.hub, 0, 1000).await.unwrap();
+    replica::apply(&travel.hub, changes).await.unwrap();
+    let part = travel.hub.uploads_dir().join(format!("hub-{id}"));
+    std::fs::write(&part, &big[..PIECE as usize]).unwrap();
+
+    peers::sync_once(&travel.hub).await.unwrap();
+    assert!(has_file(&travel, &id).await);
+    assert!(!part.exists());
+    assert_eq!(download(&travel.app, &parent, &id).await, (StatusCode::OK, big));
+}
+
+#[tokio::test]
+async fn a_picture_whose_file_is_on_the_other_hub_is_for_later() {
+    let (home, travel, parent) = paired().await;
+    let id = upload(&travel.app, &parent, picture(3000, 4)).await;
+    // Home hears of it, but it can't call the travel hub for the file.
+    let changes = replica::changes_since(&travel.hub, 0, 1000).await.unwrap();
+    replica::apply(&home.hub, changes).await.unwrap();
+    let (status, _) = download(&home.app, &parent, &id).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn a_travel_hub_copies_recent_files_that_fit_and_fetches_the_rest_when_opened() {
+    let keep = Keep { days: 30, max_bytes: 25_000 };
+    let (home, travel, parent) = paired_with(new_hub_keeping(keep).await).await;
+    let (old, older, newer) = (picture(10_000, 5), picture(10_000, 6), picture(10_000, 7));
+    let old_id = upload(&home.app, &parent, old.clone()).await;
+    let older_id = upload(&home.app, &parent, older.clone()).await;
+    let newer_id = upload(&home.app, &parent, newer.clone()).await;
+    let days_ago = |days: i64| kitchat_hub::now_ms() - days * 24 * 60 * 60 * 1000;
+    for (id, at) in [(&old_id, days_ago(90)), (&older_id, days_ago(2)), (&newer_id, days_ago(1))] {
+        sqlx::query("UPDATE media SET created_at = ? WHERE id = ?")
+            .bind(at)
+            .bind(id)
+            .execute(&home.hub.pool)
+            .await
+            .unwrap();
+    }
+
+    peers::sync_once(&travel.hub).await.unwrap();
+    // The two recent ones fit; the one from three months ago isn't copied.
+    assert!(has_file(&travel, &newer_id).await);
+    assert!(has_file(&travel, &older_id).await);
+    assert!(!has_file(&travel, &old_id).await);
+
+    // Opening it fetches it from home, and the copy kept longest makes room.
+    assert_eq!(download(&travel.app, &parent, &old_id).await, (StatusCode::OK, old));
+    assert!(has_file(&travel, &old_id).await);
+    assert!(!has_file(&travel, &older_id).await);
+    assert!(has_file(&travel, &newer_id).await);
+
+    // With home out of reach, a picture that isn't here is for later.
+    home.hub.stopping.send_replace(true);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (status, _) = download(&travel.app, &parent, &older_id).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn only_the_paired_hub_gets_or_sends_files() {
+    let (home, travel, parent) = paired().await;
+    let id = upload(&home.app, &parent, picture(3000, 8)).await;
+    let path = format!("/hubs/files/{id}");
+    let refused = [format!("Hub {}:nope", travel.hub.hub_id), format!("Bearer {parent}"), String::new()];
+    for auth in refused {
+        let res = home.app.clone().oneshot(request("GET", &path, auth.clone(), Vec::new())).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{auth}");
+        let res = home.app.clone().oneshot(request("PUT", &format!("{path}?offset=0"), auth, vec![1])).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+    let auth = format!("Hub {}:{}", travel.hub.hub_id, secret(&travel).await);
+    let res = home.app.clone().oneshot(request("GET", &path, auth, Vec::new())).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+async fn checksum(h: &TestHub, id: &str) -> Option<String> {
+    sqlx::query_scalar("SELECT sha256 FROM media WHERE id = ?").bind(id).fetch_one(&h.hub.pool).await.unwrap()
+}
+
+/// Spoils a file on disk without changing its size, as a bad disk or connection might.
+fn damage(h: &TestHub, id: &str) {
+    let path = h.hub.media_dir().join(id);
+    let mut bytes = std::fs::read(&path).unwrap();
+    let middle = bytes.len() / 2;
+    bytes[middle] ^= 0x55;
+    std::fs::write(path, bytes).unwrap();
+}
+
+#[tokio::test]
+async fn each_picture_carries_the_checksum_of_its_file() {
+    let (home, travel, parent) = paired().await;
+    let bytes = picture(2 * PIECE as usize + 7, 9);
+    let id = upload(&home.app, &parent, bytes.clone()).await;
+    let expected = kitchat_hub::hub_files::sha256(&bytes);
+    assert_eq!(checksum(&home, &id).await.as_deref(), Some(expected.as_str()));
+    peers::sync_once(&travel.hub).await.unwrap();
+    assert_eq!(checksum(&travel, &id).await.as_deref(), Some(expected.as_str()));
+    assert!(has_file(&travel, &id).await);
+}
+
+#[tokio::test]
+async fn a_file_that_arrives_damaged_is_not_kept_or_fetched_again_and_again() {
+    let (home, travel, parent) = paired().await;
+    let id = upload(&home.app, &parent, picture(PIECE as usize + 500, 10)).await;
+    damage(&home, &id);
+
+    peers::sync_once(&travel.hub).await.unwrap();
+    assert!(!has_file(&travel, &id).await);
+    assert!(!travel.hub.uploads_dir().join(format!("hub-{id}")).exists(), "the damaged copy is thrown away");
+    // The background rounds leave it for a while.
+    assert_eq!(peers::sync_once(&travel.hub).await.unwrap(), 0);
+    // Opening it still tries, and still won't show a damaged file.
+    let (status, _) = download(&travel.app, &parent, &id).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn home_refuses_a_damaged_file_from_the_travel_hub() {
+    let (home, travel, parent) = paired().await;
+    let id = upload(&travel.app, &parent, picture(3000, 11)).await;
+    damage(&travel, &id);
+
+    peers::sync_once(&travel.hub).await.unwrap();
+    assert!(!has_file(&home, &id).await);
+    assert!(!home.hub.uploads_dir().join(format!("hub-{id}")).exists());
+    assert_eq!(peers::sync_once(&travel.hub).await.unwrap(), 0, "not sent again straight away");
+}
+
+#[tokio::test]
+async fn pictures_from_before_checksums_get_theirs_and_pass_them_on() {
+    let (home, travel, parent) = paired().await;
+    let bytes = picture(3000, 12);
+    let id = upload(&home.app, &parent, bytes.clone()).await;
+    sqlx::query("UPDATE media SET sha256 = NULL").execute(&home.hub.pool).await.unwrap();
+    let expected = kitchat_hub::hub_files::sha256(&bytes);
+    peers::sync_once(&travel.hub).await.unwrap();
+    // Without one, a copy is still kept (the size is all there is to check), and notes the checksum of what came.
+    assert!(has_file(&travel, &id).await);
+    assert_eq!(checksum(&travel, &id).await.as_deref(), Some(expected.as_str()));
+
+    assert_eq!(kitchat_hub::hub_files::fill_in_checksums(&home.hub).await.unwrap(), 1);
+    assert_eq!(kitchat_hub::hub_files::fill_in_checksums(&home.hub).await.unwrap(), 0);
+    assert_eq!(checksum(&home, &id).await.as_deref(), Some(expected.as_str()));
+    peers::sync_once(&travel.hub).await.unwrap();
+    // And nothing more after that, either way.
+    assert_eq!(peers::sync_once(&travel.hub).await.unwrap(), 0);
 }
