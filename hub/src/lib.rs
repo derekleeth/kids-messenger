@@ -10,6 +10,7 @@ pub mod db;
 pub mod error;
 pub mod limits;
 pub mod live;
+pub mod peers;
 pub mod preview;
 pub mod random;
 pub mod replica;

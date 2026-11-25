@@ -14,7 +14,7 @@ use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, patch, post, put};
 
 use crate::error::{ApiError, ApiResult};
-use crate::{Hub, live};
+use crate::{Hub, live, peers};
 
 pub fn router() -> Router<Arc<Hub>> {
     Router::new()
@@ -39,6 +39,12 @@ pub fn router() -> Router<Arc<Hub>> {
         .route("/media/uploads/{id}/finish", post(media::finish_upload))
         .route("/media/{id}", get(media::download))
         .route("/notes/{id}", put(notes::save).delete(notes::remove))
+        .route("/hubs", get(peers::list))
+        .route("/hubs/codes", post(peers::new_code))
+        .route("/hubs/pair", post(peers::pair))
+        .route("/hubs/prove", post(peers::prove))
+        .route("/hubs/changes", get(peers::changes).post(peers::take_changes))
+        .route("/hubs/{id}", delete(peers::remove))
         .layer(DefaultBodyLimit::max(kit_protocol::MAX_MEDIA_BYTES + 64 * 1024))
 }
 
@@ -48,7 +54,7 @@ fn check_id(id: &str) -> ApiResult<()> {
 }
 
 /// A name a person typed: trimmed, and between 1 and `max` characters.
-fn clean_name(name: &str, max: usize, what: &str) -> ApiResult<String> {
+pub(crate) fn clean_name(name: &str, max: usize, what: &str) -> ApiResult<String> {
     let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
     if name.is_empty() {
         return Err(ApiError::bad(format!("The {what} can't be empty.")));

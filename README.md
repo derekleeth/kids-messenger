@@ -45,6 +45,12 @@ Same stack as TerminalLynx: Tauri 2, Rust (edition 2024), React 19, Vite, Tailwi
 - [docs/desktop.md](docs/desktop.md): the Windows app for a laptop: tray, start at sign-in, Links & lists.
 - [docs/releasing.md](docs/releasing.md): publish the Windows installer, Android APK and hub as a GitHub Release.
 
+Plans:
+
+- [docs/nearby_messaging_plan.md](docs/nearby_messaging_plan.md): ways to message with no internet (camping), compared.
+- [docs/multi_hub_plan.md](docs/multi_hub_plan.md): several hubs that keep each other in step, for a travel hub on
+  the router; phases 1–3 built.
+
 ## Developing
 
 ```bash
