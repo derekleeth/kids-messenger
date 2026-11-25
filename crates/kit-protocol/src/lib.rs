@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod hubs;
 pub mod links;
 pub mod media;
 pub mod notes;

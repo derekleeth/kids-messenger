@@ -12,6 +12,7 @@ pub mod limits;
 pub mod live;
 pub mod preview;
 pub mod random;
+pub mod replica;
 mod routes;
 
 use std::path::{Path, PathBuf};

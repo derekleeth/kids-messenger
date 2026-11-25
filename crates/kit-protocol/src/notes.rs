@@ -191,6 +191,35 @@ pub fn merge(stored: &Note, incoming: &Note, may_change_sharing: bool, editor: &
     out
 }
 
+/// Combines two hubs' copies of a note (docs/multi_hub_plan.md). The newest of each part wins, as in [`merge`], but
+/// each block keeps the `edited_by` its copy has: both hubs set it from their own signed-in members. Gives the same
+/// note whichever copy is `a` (apart from the order the blocks are listed in), and merging a copy with itself or
+/// with anything older changes nothing, so hubs that keep swapping copies settle.
+pub fn merge_copies(a: &Note, b: &Note) -> Note {
+    let mut out = a.clone();
+    let a_meta = Meta { title: &a.title, emoji: &a.emoji, color: &a.color, shared: a.shared };
+    let b_meta = Meta { title: &b.title, emoji: &b.emoji, color: &b.color, shared: b.shared };
+    if newer(b.meta_updated_at, &b_meta, a.meta_updated_at, &a_meta) {
+        out.title = b.title.clone();
+        out.emoji = b.emoji.clone();
+        out.color = b.color.clone();
+        out.shared = b.shared;
+        out.meta_updated_at = b.meta_updated_at;
+    }
+    for block in &b.blocks {
+        match out.blocks.iter_mut().find(|x| x.id == block.id) {
+            Some(existing) => {
+                if newer(block.updated_at, block, existing.updated_at, existing) {
+                    *existing = block.clone();
+                }
+            }
+            None => out.blocks.push(block.clone()),
+        }
+    }
+    out.created_at = a.created_at.min(b.created_at);
+    out
+}
+
 /// Checks an incoming note before it's stored. Returns what's wrong, for the error message.
 pub fn validate(note: &Note) -> Result<(), String> {
     if note.id.is_empty() || note.id.len() > 64 {
@@ -365,6 +394,45 @@ mod tests {
         changed.blocks[0].text = "oat milk".into();
         changed.blocks[0].updated_at = 5;
         assert_eq!(merge(&stored, &changed, true, "mom").blocks[0].edited_by, "mom");
+    }
+
+    #[test]
+    fn two_hubs_copies_combine_the_same_either_way_and_settle() {
+        let mut a_edit = block("a", "milk", 5);
+        a_edit.edited_by = "kid".into();
+        let mut a = note(vec![a_edit, block("b", "eggs", 1)]);
+        a.title = "Shopping".into();
+        a.meta_updated_at = 7;
+        let mut b_edit = block("b", "eggs", 6);
+        b_edit.checked = true;
+        b_edit.edited_by = "mom".into();
+        let b = note(vec![block("a", "milk", 1), b_edit, block("c", "jam", 2)]);
+
+        let sorted = |mut n: Note| {
+            n.blocks.sort_by(|x, y| x.id.cmp(&y.id));
+            n
+        };
+        let ab = merge_copies(&a, &b);
+        assert_eq!(sorted(ab.clone()), sorted(merge_copies(&b, &a)));
+        assert_eq!(ab.title, "Shopping");
+        assert_eq!(ab.blocks[0].edited_by, "kid");
+        assert!(ab.blocks[1].checked);
+        assert_eq!(ab.blocks[1].edited_by, "mom", "each copy's editor is kept");
+        assert_eq!(ab.blocks.len(), 3);
+        // Nothing more to change: with itself, or with either older copy.
+        assert_eq!(merge_copies(&ab, &ab), ab);
+        assert_eq!(merge_copies(&ab, &a), ab);
+        assert_eq!(merge_copies(&ab, &b), ab);
+    }
+
+    #[test]
+    fn a_preview_one_hub_fetched_is_kept_whichever_copy_comes_first() {
+        // The hub adds a preview without changing the line's time, so the other hub's copy is as new, without one.
+        let plain = note(vec![block("a", "https://lego.com/set", 3)]);
+        let mut with_preview = plain.clone();
+        with_preview.blocks[0].link = Some(preview_of("https://lego.com/set"));
+        assert_eq!(merge_copies(&plain, &with_preview), with_preview);
+        assert_eq!(merge_copies(&with_preview, &plain), with_preview);
     }
 
     #[test]
