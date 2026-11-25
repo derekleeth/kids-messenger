@@ -38,8 +38,8 @@ Photos and videos, editing shared lists and the desktop app are welcome where a 
 
 ## What every route needs first
 
-These are needed whichever route is chosen (except B, the travel hub, which needs none of them), and they help plain
-offline sending too.
+These are needed whichever route is chosen (B, the travel hub, needs only the second), and they help plain offline
+sending too.
 
 ### 1. The family roster
 
@@ -117,21 +117,22 @@ guest networks, so use the main network.
 
 ### B. A travel hub on a laptop or the travel router
 
-Run `kitchat-hub` itself on the trip: on a laptop, or on the travel router if it runs OpenWrt (GL.iNet and similar) and
-can take a hub built for its processor, with the data on a microSD card or USB stick. Each device gets the travel hub as
-one more hub address; trying several hub addresses in order already exists.
+Run `kitchat-hub` itself on the trip: on a laptop, or on our travel router, a GL.iNet GL-MT3600BE Beryl 7 (64-bit
+ARM, 512 MB of memory, OpenWrt, a USB 3.0 port for the data). Each device gets the travel hub as one more hub address.
+
+Copying the home hub's data to the travel hub works for a first try, but leaves two histories that drift apart. The
+chosen way to fix that is **several hubs that keep each other in step**: every hub has a full copy of the family and
+they swap changes whenever they can reach each other. That design, the merge rules, running the hub on the Beryl 7 and
+the phases are in [multi_hub_plan.md](multi_hub_plan.md).
 
 | Pros | Cons |
 | --- | --- |
-| No new app code; **everything** works, photos, videos and lists included | Two hubs, two histories: messages from the trip have to be brought back into the home hub afterwards. A "sync this hub into the main one" tool is real work (IDs, `rev` numbers, members, media) |
-| No licence questions | Needs the laptop or router running, and everyone in its Wi-Fi range |
-| Combines well with C: a radio can be the travel hub's gateway | Running the hub on a router depends on its model, processor and storage |
-| | The family has to be set up on the travel hub (or copied over before the trip) |
+| **Everything** works on the trip: photos, videos and lists included | Needs the laptop or router running, and everyone in its Wi-Fi range |
+| With hubs in step, nothing to merge after the trip; when the router has internet, home and the trip see each other at once | Several hubs is about 3–4 weeks of work (see the plan) |
+| No licence questions | The router's clock can be wrong without internet, so times have to come from the devices |
+| Combines well with C: a radio can be the travel hub's gateway | |
 
-A variant without the merge: the travel hub is only a **cache** that passes messages on to the home hub whenever the
-router has internet. That needs hub-to-hub forwarding, which is about the same work as the merge tool.
-
-**Size:** none to start on a laptop with a copied family; 1–2 weeks for the merge or forwarding tool.
+**Size:** none to start on a laptop with a copied family; about 3–4 weeks for hubs that keep each other in step.
 
 ### C. Our Meshtastic radios
 
@@ -237,9 +238,9 @@ None of these gives Bluetooth and Wi-Fi together under a permissive licence as a
 | Lists and notes | Later | ✅ | ❌ | Later |
 | Desktop app | ✅ | ✅ | Hub/USB only | ❌ |
 | Licence | Apache-2.0 | None | GPL-3.0 | AGPL-3.0 or paid |
-| New code | ~1.5 weeks | None, then 1–2 weeks to merge | ~3 weeks | ~3 weeks plus spike |
+| New code | ~1.5 weeks | None to try, ~3–4 weeks for hubs in step | ~3 weeks | ~3 weeks plus spike |
 | Battery | Low | Low | Low (radio has its own) | Highest (BLE scanning) |
-| Risk | Router isolation settings; Android leaving a no-internet Wi-Fi | Merging histories | GPL; firmware changes | AGPL; SDK churn; background limits |
+| Risk | Router isolation settings; Android leaving a no-internet Wi-Fi | Keeping hubs in step; the router's clock | GPL; firmware changes | AGPL; SDK churn; background limits |
 
 ## The hub: what it can do
 
@@ -256,7 +257,8 @@ Ranked by value for us:
    while Camping mode is on), and Camping mode for everyone switched on from the Family screen before a trip. Synced
    like members.
 5. **One history for parents** (comes free). Every message still reaches the hub from its sender's outbox.
-6. **Travel hub** (B), as a copy or a cache of the home hub.
+6. **Several hubs in step** (B): the travel hub on the Beryl 7 swaps changes with the home hub whenever it can reach
+   it. See [multi_hub_plan.md](multi_hub_plan.md).
 7. **Carrying other people's messages to the hub** (later, optional). If a kid's tablet stays offline for days, the
    first family device back online could upload what it received on the sender's behalf. The hub would need the
    sender's signature with their roster key, which A can provide (the key is ours); D would need a signing call the
@@ -315,13 +317,15 @@ firmware allows it.
 3. **C. Meshtastic radios and the hub gateway** for distance, once we've decided on the GPL.
 4. **D. Phone-to-phone Bluetooth** probably isn't needed: A covers "close together" and C covers "far apart" better.
    Look at it again only if there are often trips with no router and no radios.
-5. **B. Travel hub** in addition, if photos and lists on trips matter enough to build the merge tool.
+5. **B. Travel hub** with several hubs in step ([multi_hub_plan.md](multi_hub_plan.md)). Chosen to start first: its
+   phase 1 (hub IDs, a sync position per hub, `sentAt`) is groundwork the other routes share.
 
 ## Open questions
 
 1. **Licence:** release KitChat under GPL-3.0-or-later (needed for C or D)? Keep Kit's artwork under its own licence?
 2. **Heltec model:** WiFi LoRa 32 V3/V4 (Wi-Fi gateway) or T114 (USB gateway)? The board name is printed on it.
-3. **Travel router model:** can it run the hub (for B and a camp gateway)?
+3. ~~**Travel router model**~~: a GL.iNet GL-MT3600BE Beryl 7, which can run the hub (see
+   [multi_hub_plan.md](multi_hub_plan.md)).
 4. **Kids and the offline routes:** on for kids all the time, only in Camping mode, or only to reach a parent?
 5. **Kids' location** from the cards' GPS: a parent-only map, or not at all?
 6. **Relaying:** may kids' devices pass on others' messages (range against battery), or parents' only?
