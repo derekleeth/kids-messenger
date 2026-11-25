@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use kit_protocol::{Chat, Event, MarkRead, Message, MessageBody, React, STICKERS, SendMessage};
+use kit_protocol::{Chat, Event, LinkPreview, MarkRead, Message, MessageBody, React, STICKERS, SendMessage};
 use serde::Deserialize;
 use sqlx::SqliteConnection;
 
@@ -236,13 +236,19 @@ pub async fn send(
     Ok(Json(message))
 }
 
-async fn add_preview(hub: &Hub, message_id: &str, url: &str, members: Vec<String>) -> ApiResult<()> {
-    let Some(fetcher) = &hub.previews else { return Ok(()) };
-    let Some(fetched) = fetcher.fetch(url).await else { return Ok(()) };
+/// Fetches a link's preview and keeps its picture in the hub's media.
+pub(super) async fn fetch_preview(hub: &Hub, url: &str) -> ApiResult<Option<LinkPreview>> {
+    let Some(fetcher) = &hub.previews else { return Ok(None) };
+    let Some(fetched) = fetcher.fetch(url).await else { return Ok(None) };
     let mut preview = fetched.preview;
     if let Some((bytes, kind)) = fetched.image {
         preview.image_media_id = Some(super::media::store(hub, None, bytes, kind).await?);
     }
+    Ok(Some(preview))
+}
+
+async fn add_preview(hub: &Hub, message_id: &str, url: &str, members: Vec<String>) -> ApiResult<()> {
+    let Some(preview) = fetch_preview(hub, url).await? else { return Ok(()) };
     let mut tx = hub.pool.begin().await?;
     let rev = db::next_rev(&mut tx).await?;
     sqlx::query("UPDATE messages SET link_json = ?, rev = ? WHERE id = ?")

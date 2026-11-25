@@ -2,7 +2,8 @@
 // how the hub combines edits from two people on a family list (crates/kit-protocol/src/notes.rs). Deleting a line
 // leaves it marked deleted rather than removing it, so it can't come back from someone else's older copy.
 
-import type { Block, BlockKind, Note } from "./types";
+import { firstLink, normalize } from "./links";
+import type { Block, BlockKind, LinkPreview, Note } from "./types";
 import { ulid } from "./ulid";
 
 export interface Template {
@@ -60,7 +61,18 @@ export const NOTE_EMOJI = [
 ];
 
 function block(kind: BlockKind, text: string, pos: number, now: number): Block {
-  return { id: ulid(now), kind, text, checked: false, url: "", pos, updatedAt: now, deleted: false, editedBy: "" };
+  return {
+    id: ulid(now),
+    kind,
+    text,
+    checked: false,
+    url: "",
+    pos,
+    updatedAt: now,
+    deleted: false,
+    editedBy: "",
+    link: null,
+  };
 }
 
 export function newNote(ownerId: string, template: Template, now = Date.now()): Note {
@@ -157,6 +169,16 @@ export function markEdited(before: Note, after: Note, editor: string): Note {
   };
 }
 
+/** The web link on a line: a link line's address, or else the first link in what it says. */
+export function linkUrl(b: Block): string | null {
+  return (b.kind === "link" ? normalize(b.url) : null) ?? firstLink(b.text);
+}
+
+/** The hub's preview of the line's link, unless the link has changed since. */
+export function linkPreview(b: Block): LinkPreview | null {
+  return b.link && b.link.url === linkUrl(b) ? b.link : null;
+}
+
 export function progress(note: Note): { done: number; total: number } {
   const checks = visibleBlocks(note).filter((b) => b.kind === "check" && (b.text.trim() || b.checked));
   return { done: checks.filter((b) => b.checked).length, total: checks.length };
@@ -168,7 +190,7 @@ export function previewLines(note: Note, lines = 4): string[] {
     .map((b) => {
       if (b.kind === "check") return `${b.checked ? "☑" : "☐"} ${b.text}`;
       if (b.kind === "bullet") return `• ${b.text}`;
-      if (b.kind === "link") return b.text || b.url;
+      if (b.kind === "link") return b.text || linkPreview(b)?.title || b.url;
       return b.text;
     })
     .filter((l) => l.replace(/[☑☐•]/g, "").trim())

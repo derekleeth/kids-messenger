@@ -486,6 +486,7 @@ mod tests {
                 updated_at: 1,
                 deleted: false,
                 edited_by: String::new(),
+                link: None,
             }],
             created_at: 1,
             meta_updated_at: 1,

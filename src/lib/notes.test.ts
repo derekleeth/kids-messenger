@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   insertAfter,
   isEmpty,
+  linkPreview,
+  linkUrl,
   markEdited,
   moveBlock,
   newNote,
@@ -114,5 +116,33 @@ describe("notes", () => {
 
     const [added, id] = insertAfter(moved, null, "check", 7002);
     expect(editor(markEdited(moved, added, "dad"), id)).toBe("dad");
+  });
+
+  it("finds the link on a line, and drops a preview once the link changes", () => {
+    let note = newNote("me", list, 1000);
+    const id = note.blocks[0].id;
+    note = updateBlock(note, id, { text: "Lego set www.lego.com/set!" }, 1001);
+    const b = note.blocks[0];
+    expect(linkUrl(b)).toBe("https://www.lego.com/set");
+    const link = {
+      url: "https://www.lego.com/set",
+      title: "Space shuttle",
+      description: "",
+      site: "LEGO",
+      imageMediaId: null,
+    };
+    expect(linkPreview({ ...b, link })).toBe(link);
+    expect(linkPreview({ ...b, text: "https://other.example", link })).toBeNull();
+    expect(linkUrl({ ...b, kind: "link", url: "https://a.example/x" })).toBe("https://a.example/x");
+  });
+
+  it("names a link line by its page's title when it has no words", () => {
+    const sites = TEMPLATES.find((t) => t.id === "sites")!;
+    let note = newNote("me", sites, 1000);
+    const id = note.blocks[0].id;
+    note = updateBlock(note, id, { url: "https://a.example" }, 1001);
+    expect(previewLines(note)).toEqual(["https://a.example"]);
+    note.blocks[0].link = { url: "https://a.example", title: "A page", description: "", site: "a", imageMediaId: null };
+    expect(previewLines(note)).toEqual(["A page"]);
   });
 });

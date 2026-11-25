@@ -5,9 +5,10 @@
 //! The hub only fetches public internet addresses: names that resolve to the home network, the hub's own computer or
 //! a VPN range are refused, so a link can't be used to probe the house's router or other devices.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use kit_protocol::LinkPreview;
 use reqwest::Url;
@@ -102,6 +103,29 @@ impl Fetcher {
         let bytes = read_limited(response, IMAGE_LIMIT).await?;
         let kind = kit_protocol::media::sniff(&bytes).filter(|k| kit_protocol::media::is_shown_picture(k))?;
         Some((bytes, kind))
+    }
+}
+
+/// How long a link's preview (or that it has none) is remembered. A list saves as it's typed, so without this each
+/// save would fetch its links again.
+const REMEMBER_FOR: Duration = Duration::from_secs(30 * 60);
+
+/// Previews fetched lately, by link: `Some(None)` is a link with no preview, or one still being fetched.
+#[derive(Default)]
+pub struct Recent {
+    links: Mutex<HashMap<String, (Instant, Option<LinkPreview>)>>,
+}
+
+impl Recent {
+    pub fn get(&self, url: &str) -> Option<Option<LinkPreview>> {
+        let links = self.links.lock().unwrap_or_else(|e| e.into_inner());
+        links.get(url).filter(|(at, _)| at.elapsed() < REMEMBER_FOR).map(|(_, p)| p.clone())
+    }
+
+    pub fn put(&self, url: &str, preview: Option<LinkPreview>) {
+        let mut links = self.links.lock().unwrap_or_else(|e| e.into_inner());
+        links.retain(|_, (at, _)| at.elapsed() < REMEMBER_FOR);
+        links.insert(url.to_string(), (Instant::now(), preview));
     }
 }
 
@@ -353,6 +377,14 @@ mod tests {
         assert!(!is_public_url(&Url::parse("http://192.168.0.1/admin").unwrap()));
         assert!(!is_public_url(&Url::parse("http://router.local/").unwrap()));
         assert!(is_public_url(&Url::parse("https://lego.com/").unwrap()));
+    }
+
+    #[test]
+    fn recent_remembers_links() {
+        let recent = Recent::default();
+        assert_eq!(recent.get("https://a.example"), None);
+        recent.put("https://a.example", None);
+        assert_eq!(recent.get("https://a.example"), Some(None));
     }
 
     #[test]

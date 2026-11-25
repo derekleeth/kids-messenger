@@ -17,10 +17,12 @@ import {
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { api, errorText, openLink } from "../lib/api";
 import { useBack } from "../lib/back";
-import { normalize } from "../lib/links";
+import { site } from "../lib/links";
 import {
   insertAfter,
   isEmpty,
+  linkPreview,
+  linkUrl,
   markEdited,
   moveBlock,
   NOTE_EMOJI,
@@ -32,8 +34,9 @@ import {
   visibleBlocks,
 } from "../lib/notes";
 import { memberById, otherMember, useAppState } from "../lib/state";
-import { COLORS, type Block, type BlockKind, type Member, type Note } from "../lib/types";
+import { COLORS, type Block, type BlockKind, type LinkPreview, type Member, type Note } from "../lib/types";
 import { Kit } from "./Kit";
+import { MediaImage } from "./MessageBubble";
 import { Avatar, Button, Confetti, IconButton, Sheet, toast } from "./ui";
 
 const SAVE_AFTER_MS = 600;
@@ -66,7 +69,8 @@ export function NoteEditor({ noteId, onBack }: { noteId: string; onBack: (() => 
     if (!stored) return;
     setDraft((d) => {
       if (!d || d.id !== stored.id) return stored;
-      const unsaved = lastSent.current !== d;
+      // `=== stored` too: React can run this twice, and the first run has already moved `lastSent` on.
+      const unsaved = lastSent.current !== d && lastSent.current !== stored;
       if (unsaved) return d;
       lastSent.current = stored;
       return stored;
@@ -353,7 +357,8 @@ function BlockRow({
   onDelete: () => void;
   onKey: (e: KeyboardEvent) => void;
 }) {
-  const link = block.kind === "link" ? normalize(block.url) : null;
+  const link = linkUrl(block);
+  const preview = linkPreview(block);
   const showEditor = editor && block.kind !== "heading" && (block.text.trim() || block.url.trim());
   const editorName = isMe ? "You" : editor?.name;
   return (
@@ -402,7 +407,7 @@ function BlockRow({
             <span className="truncate">{editorName}</span>
           </span>
         )}
-        {link && (
+        {link && !preview && (
           <IconButton label="Open link" onClick={() => void openLink(link)} className="size-10">
             <ExternalLink size={18} />
           </IconButton>
@@ -418,6 +423,12 @@ function BlockRow({
           inputMode="url"
           autoCapitalize="off"
           className="mb-1 ml-9 w-[calc(100%-2.25rem)] rounded-xl bg-surface-2 px-3 py-1.5 text-sm text-ink-soft outline-none"
+        />
+      )}
+      {preview && (
+        <LinkCard
+          link={preview}
+          className={block.kind === "check" || block.kind === "bullet" ? "ml-11" : block.kind === "link" ? "ml-9" : ""}
         />
       )}
       {focused && (
@@ -462,6 +473,31 @@ function BlockRow({
         </div>
       )}
     </div>
+  );
+}
+
+/** What a line's link is: the page's picture, title and site, from the hub. Tapping it opens the page. */
+function LinkCard({ link, className }: { link: LinkPreview; className: string }) {
+  return (
+    <button
+      onClick={() => void openLink(link.url)}
+      className={`mb-1 flex w-auto items-center gap-3 overflow-hidden rounded-2xl bg-surface p-2 text-left shadow-sm transition hover:shadow-md active:scale-[0.99] ${className}`}
+    >
+      {link.imageMediaId ? (
+        <MediaImage id={link.imageMediaId} width={1} height={1} className="size-16 shrink-0 rounded-xl" />
+      ) : (
+        <span className="grid size-16 shrink-0 place-items-center rounded-xl bg-surface-2 text-[var(--tint)]">
+          <Link2 />
+        </span>
+      )}
+      <span className="min-w-0 flex-1">
+        <span className="line-clamp-2 leading-snug font-extrabold">{link.title || link.site || site(link.url)}</span>
+        {link.description && <span className="line-clamp-1 text-sm text-ink-soft">{link.description}</span>}
+        <span className="flex items-center gap-1 text-xs font-bold text-ink-soft">
+          <ExternalLink size={12} /> <span className="truncate">{link.site || site(link.url)}</span>
+        </span>
+      </span>
+    </button>
   );
 }
 

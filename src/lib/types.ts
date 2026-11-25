@@ -91,6 +91,8 @@ export interface Block {
   deleted: boolean;
   /** The member who last changed this line. Empty for lines from before the hub kept track. */
   editedBy: string;
+  /** The page the line links to, fetched by the hub. Only shown while it's still for the line's link (`linkPreview`). */
+  link: LinkPreview | null;
 }
 
 export interface Note {

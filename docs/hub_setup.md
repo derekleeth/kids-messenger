@@ -35,7 +35,7 @@ Options:
 | `--data DIR`           | `./hub-data` (KITCHAT_DATA)   | Where the database and pictures are kept. Back it up. |
 | `--port N`             | `8787` (KITCHAT_PORT)         | The port the app connects to. |
 | `--bind ADDR`          | `0.0.0.0` (KITCHAT_BIND)      | Which network to listen on (`127.0.0.1` = this computer only, e.g. behind a tunnel or nginx). |
-| `--no-previews`        | previews on (KITCHAT_NO_PREVIEWS=1 turns them off) | Don't fetch link previews (titles and pictures for shared links). |
+| `--no-previews`        | previews on (KITCHAT_NO_PREVIEWS=1 turns them off) | Don't fetch link previews (titles and pictures for links in chats and lists). |
 | `--trust-proxy`        | off (KITCHAT_TRUST_PROXY=1)   | The hub is behind a reverse proxy on the same computer (nginx): take each device's address from `X-Real-IP` (or the last `X-Forwarded-For`), but only from connections that come from `127.0.0.1`/`::1`. Use it with `--bind 127.0.0.1`; the hub warns if you don't. |
 | `--rate-limit-scale X` | `1` (KITCHAT_RATE_LIMIT_SCALE) | Multiplies the rate limits below, e.g. `2` for twice as many requests. |
 

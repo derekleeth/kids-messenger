@@ -6,9 +6,11 @@
 //! tombstone (`deleted: true`), so a device that hasn't heard of the deletion can't bring the block back.
 //!
 //! The hub also records who last changed each block (`edited_by`), from the signed-in member rather than from what the
-//! device says.
+//! device says, and fills in a preview of the web link on a line (`link`), which devices can't set either.
 
 use serde::{Deserialize, Serialize};
+
+use crate::LinkPreview;
 
 /// Most blocks in one note, tombstones included.
 pub const MAX_BLOCKS: usize = 500;
@@ -46,9 +48,26 @@ pub struct Block {
     /// The member who last changed what this block says. Set by the hub; empty for lines from before it kept track.
     #[serde(default)]
     pub edited_by: String,
+    /// The page the line links to, fetched by the hub. Only shown while it's still for the line's link
+    /// ([`Block::link_url`]).
+    #[serde(default)]
+    pub link: Option<LinkPreview>,
 }
 
 impl Block {
+    /// The web link a preview is for: a link line's address, or else the first link in what the line says.
+    pub fn link_url(&self) -> Option<String> {
+        let from_url = if self.kind == BlockKind::Link { crate::links::normalize(&self.url) } else { None };
+        from_url.or_else(|| crate::links::first(&self.text))
+    }
+
+    /// Whether the hub still has to fetch a preview for this line: (its ID, the link).
+    pub fn wants_preview(&self) -> Option<(String, String)> {
+        let url = self.link_url()?;
+        let has = self.link.as_ref().is_some_and(|l| l.url == url);
+        (!self.deleted && !has).then(|| (self.id.clone(), url))
+    }
+
     /// Whether the two say the same thing. Moving a line isn't changing it, so `pos` doesn't count.
     fn same_content(&self, other: &Block) -> bool {
         self.kind == other.kind
@@ -97,7 +116,12 @@ impl Note {
             .map(|b| match b.kind {
                 BlockKind::Check => format!("{} {}", if b.checked { "☑" } else { "☐" }, b.text),
                 BlockKind::Bullet => format!("• {}", b.text),
-                BlockKind::Link if b.text.is_empty() => b.url.clone(),
+                BlockKind::Link if b.text.is_empty() => match &b.link {
+                    Some(link) if !link.title.is_empty() && Some(&link.url) == b.link_url().as_ref() => {
+                        link.title.clone()
+                    }
+                    _ => b.url.clone(),
+                },
                 _ => b.text.clone(),
             })
             .filter(|line| !line.trim().is_empty())
@@ -144,17 +168,22 @@ pub fn merge(stored: &Note, incoming: &Note, may_change_sharing: bool, editor: &
         let mut block = block.clone();
         match out.blocks.iter_mut().find(|b| b.id == block.id) {
             Some(existing) => {
-                // Whatever the device says about the editor is ignored, here and when settling a tie.
+                // Whatever the device says about the editor or the preview is ignored, here and when settling a tie.
                 block.edited_by = existing.edited_by.clone();
+                block.link = existing.link.clone();
                 if newer(block.updated_at, &block, existing.updated_at, existing) {
                     if !block.same_content(existing) {
                         block.edited_by = editor.to_string();
+                    }
+                    if block.link.as_ref().map(|l| &l.url) != block.link_url().as_ref() {
+                        block.link = None;
                     }
                     *existing = block;
                 }
             }
             None => {
                 block.edited_by = editor.to_string();
+                block.link = None;
                 out.blocks.push(block);
             }
         }
@@ -202,6 +231,17 @@ mod tests {
             updated_at: at,
             deleted: false,
             edited_by: String::new(),
+            link: None,
+        }
+    }
+
+    fn preview_of(url: &str) -> LinkPreview {
+        LinkPreview {
+            url: url.into(),
+            title: "Lego set".into(),
+            description: String::new(),
+            site: "lego.com".into(),
+            image_media_id: None,
         }
     }
 
@@ -335,6 +375,53 @@ mod tests {
         gone.deleted = true;
         let n = note(vec![block("a", "second", 1), gone, first]);
         assert_eq!(n.preview(5), vec!["☐ first", "☐ second"]);
+    }
+
+    #[test]
+    fn a_line_links_to_its_address_or_the_first_link_it_says() {
+        let mut b = block("a", "want this https://lego.com/set!", 1);
+        assert_eq!(b.link_url().as_deref(), Some("https://lego.com/set"));
+        b.kind = BlockKind::Link;
+        b.url = "www.lego.com/other".into();
+        assert_eq!(b.link_url().as_deref(), Some("https://www.lego.com/other"));
+        assert_eq!(block("a", "no link here", 1).link_url(), None);
+    }
+
+    #[test]
+    fn a_preview_stays_only_while_the_link_is_the_same() {
+        let mut stored_block = block("a", "https://lego.com/set", 1);
+        stored_block.link = Some(preview_of("https://lego.com/set"));
+        let stored = note(vec![stored_block]);
+        assert_eq!(stored.blocks[0].wants_preview(), None);
+
+        // A device's copy from before the preview arrived, ticked: the preview stays.
+        let mut ticked = stored.clone();
+        ticked.blocks[0].link = None;
+        ticked.blocks[0].checked = true;
+        ticked.blocks[0].updated_at = 5;
+        let merged = merge(&stored, &ticked, true, "mom");
+        assert!(merged.blocks[0].checked);
+        assert!(merged.blocks[0].link.is_some());
+
+        // The link changed: the old preview goes, and a new one is wanted.
+        let mut changed = merged.clone();
+        changed.blocks[0].text = "https://lego.com/other".into();
+        changed.blocks[0].updated_at = 9;
+        let merged = merge(&merged, &changed, true, "mom");
+        assert!(merged.blocks[0].link.is_none());
+        assert_eq!(merged.blocks[0].wants_preview(), Some(("a".into(), "https://lego.com/other".into())));
+    }
+
+    #[test]
+    fn a_device_cannot_make_up_a_preview() {
+        let stored = note(vec![block("a", "https://lego.com/set", 1)]);
+        let mut incoming = stored.clone();
+        incoming.blocks[0].link = Some(preview_of("https://lego.com/set"));
+        let mut added = block("b", "https://lego.com/b", 2);
+        added.link = Some(preview_of("https://lego.com/b"));
+        incoming.blocks.push(added);
+        let merged = merge(&stored, &incoming, true, "mom");
+        assert!(merged.blocks.iter().all(|b| b.link.is_none()));
     }
 
     #[test]

@@ -6,6 +6,7 @@
 //
 // Others reply now and then, and links get a preview, so the chat feels alive.
 
+import { linkPreview, linkUrl } from "./notes";
 import { onShelf } from "./shelf";
 import type { Account, Chat, Delta, Device, Member, Message, MessageBody, Note, OutgoingMedia, Status } from "./types";
 
@@ -145,6 +146,7 @@ function block(
     updatedAt: t0,
     deleted: false,
     editedBy: "",
+    link: null,
     ...extra,
   };
 }
@@ -199,6 +201,7 @@ const notes: Note[] = [
     rev: 1,
   },
 ];
+notes.forEach((n, i) => (notes[i] = withPreviews(n)));
 
 // Things Sam sent Dad, for the Links & lists panel.
 messages.push(
@@ -314,6 +317,28 @@ function sent(chatId: string, body: MessageBody): Message {
     if (Math.random() < 0.6) someoneReplies(chatId);
   }, 350);
   return pending;
+}
+
+/** Like the hub: a line with a web link gets a made-up preview. */
+function withPreviews(note: Note): Note {
+  return {
+    ...note,
+    blocks: note.blocks.map((b) => {
+      const url = linkUrl(b);
+      if (!url || linkPreview(b)) return b;
+      const site = new URL(url).hostname.replace(/^www\./, "");
+      return {
+        ...b,
+        link: {
+          url,
+          title: `A page on ${site}`,
+          description: "A preview fetched by the family hub.",
+          site,
+          imageMediaId: "MEDIA-DEMO",
+        },
+      };
+    }),
+  };
 }
 
 function wait(ms = 120) {
@@ -472,7 +497,7 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
       return chat as T;
     }
     case "save_note": {
-      const note = a.note as unknown as Note;
+      const note = withPreviews(a.note as unknown as Note);
       const at = notes.findIndex((n) => n.id === note.id);
       if (at >= 0) notes[at] = note;
       else notes.push(note);

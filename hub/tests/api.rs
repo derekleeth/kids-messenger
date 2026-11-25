@@ -563,6 +563,7 @@ fn block(text: &str, at: i64) -> Block {
         updated_at: at,
         deleted: false,
         edited_by: String::new(),
+        link: None,
     }
 }
 
