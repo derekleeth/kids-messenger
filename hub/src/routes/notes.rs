@@ -1,5 +1,8 @@
 //! Notes and lists. A note is its owner's alone until they make it a family list; then everyone can see and edit it,
 //! and edits are combined block by block (kit_protocol::notes::merge).
+//!
+//! A line with a web link gets a preview card, like a message does: after a save the hub fetches the pages it hasn't
+//! seen lately and sends the note again with them.
 
 use std::sync::Arc;
 
@@ -45,6 +48,7 @@ pub async fn save(
             note.created_at = now_ms();
             for block in &mut note.blocks {
                 block.edited_by = me.clone();
+                block.link = None;
             }
             (note, false)
         }
@@ -52,32 +56,96 @@ pub async fn save(
     if merged.blocks.len() > notes::MAX_BLOCKS {
         return Err(ApiError::bad(format!("A note can have up to {} lines.", notes::MAX_BLOCKS)));
     }
-    let rev = db::next_rev(&mut tx).await?;
     let mut merged = merged;
-    merged.rev = rev;
+    let to_fetch = previews_to_fetch(&hub, &mut merged);
+    let rev = put(&mut tx, &mut merged).await?;
+    tx.commit().await?;
+
+    announce(&hub, &merged);
+    if !merged.shared && was_shared {
+        live::send(&hub, Audience::AllBut(vec![merged.owner_id.clone()]), Event::NoteDeleted { rev, id: id.clone() });
+    }
+    for url in to_fetch {
+        let (hub, id) = (hub.clone(), id.clone());
+        tokio::spawn(async move {
+            if let Err(e) = add_preview(&hub, &id, &url).await {
+                log::warn!("link preview failed: {e}");
+            }
+        });
+    }
+    Ok(Json(merged))
+}
+
+/// The most links one save fetches; the rest wait for the next save.
+const FETCHES_PER_SAVE: usize = 12;
+
+/// Fills in the previews the hub fetched lately, and returns the links it still has to fetch.
+fn previews_to_fetch(hub: &Hub, note: &mut Note) -> Vec<String> {
+    if hub.previews.is_none() {
+        return Vec::new();
+    }
+    let mut to_fetch: Vec<String> = Vec::new();
+    for block in &mut note.blocks {
+        let Some((_, url)) = block.wants_preview() else { continue };
+        match hub.recent_previews.get(&url) {
+            Some(Some(preview)) => block.link = Some(preview),
+            Some(None) => {}
+            None if to_fetch.len() < FETCHES_PER_SAVE && !to_fetch.contains(&url) => to_fetch.push(url),
+            None => {}
+        }
+    }
+    // Marked as being fetched, so the saves made while it is don't fetch it again.
+    for url in &to_fetch {
+        hub.recent_previews.put(url, None);
+    }
+    to_fetch
+}
+
+/// Fetches a link's preview and adds it to every line of the note that still links there.
+async fn add_preview(hub: &Hub, note_id: &str, url: &str) -> ApiResult<()> {
+    let preview = super::chats::fetch_preview(hub, url).await?;
+    hub.recent_previews.put(url, preview.clone());
+    let Some(preview) = preview else { return Ok(()) };
+    let mut tx = hub.pool.begin().await?;
+    let Some((mut note, false)) = db::note(&mut tx, note_id).await? else { return Ok(()) };
+    let mut changed = false;
+    for block in &mut note.blocks {
+        if block.wants_preview().is_some_and(|(_, wanted)| wanted == url) {
+            block.link = Some(preview.clone());
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    put(&mut tx, &mut note).await?;
+    tx.commit().await?;
+    announce(hub, &note);
+    Ok(())
+}
+
+/// Stores a note with a new change counter, and returns the counter.
+async fn put(tx: &mut sqlx::SqliteConnection, note: &mut Note) -> ApiResult<i64> {
+    let rev = db::next_rev(&mut *tx).await?;
+    note.rev = rev;
     sqlx::query(
         "INSERT INTO notes (id, owner_id, json, shared, rev) VALUES (?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET json = excluded.json, shared = excluded.shared, rev = excluded.rev",
     )
-    .bind(&merged.id)
-    .bind(&merged.owner_id)
-    .bind(serde_json::to_string(&merged)?)
-    .bind(merged.shared)
+    .bind(&note.id)
+    .bind(&note.owner_id)
+    .bind(serde_json::to_string(&note)?)
+    .bind(note.shared)
     .bind(rev)
     .execute(&mut *tx)
     .await?;
-    tx.commit().await?;
+    Ok(rev)
+}
 
-    let owner = merged.owner_id.clone();
-    if merged.shared {
-        live::send(&hub, Audience::Everyone, Event::Note { rev, note: merged.clone() });
-    } else {
-        live::send(&hub, Audience::Members(vec![owner.clone()]), Event::Note { rev, note: merged.clone() });
-        if was_shared {
-            live::send(&hub, Audience::AllBut(vec![owner]), Event::NoteDeleted { rev, id: merged.id.clone() });
-        }
-    }
-    Ok(Json(merged))
+/// Sends a note to everyone who can see it.
+fn announce(hub: &Hub, note: &Note) {
+    let audience = if note.shared { Audience::Everyone } else { Audience::Members(vec![note.owner_id.clone()]) };
+    live::send(hub, audience, Event::Note { rev: note.rev, note: note.clone() });
 }
 
 pub async fn remove(State(hub): State<Arc<Hub>>, authed: Authed, Path(id): Path<String>) -> ApiResult<Json<()>> {

@@ -32,6 +32,8 @@ pub struct Hub {
     pub guard: auth::CodeGuard,
     /// Fetches link previews. `None` turns previews off (tests, or `--no-previews`).
     pub previews: Option<preview::Fetcher>,
+    /// Link previews fetched lately, for the links on lists.
+    pub recent_previews: preview::Recent,
     /// Rate limits, lockouts and the client-address rules ([`limits`]).
     pub limits: Arc<limits::Limits>,
     /// Set to true when the hub is shutting down, so `/live` sockets close.
@@ -69,6 +71,7 @@ pub async fn open(options: Options) -> Result<Arc<Hub>, error::ApiError> {
         setup_code: Mutex::new(setup_code),
         guard: auth::CodeGuard::default(),
         previews,
+        recent_previews: preview::Recent::default(),
         limits: Arc::new(limits::Limits::new(options.limits)),
         stopping: watch::Sender::new(false),
     }))
@@ -106,6 +109,7 @@ pub async fn open_in_memory_with(data_dir: PathBuf, limits: limits::Config) -> R
         setup_code: Mutex::new(Some(random::setup_code())),
         guard: auth::CodeGuard::default(),
         previews: None,
+        recent_previews: preview::Recent::default(),
         limits: Arc::new(limits::Limits::new(limits)),
         stopping: watch::Sender::new(false),
     }))
