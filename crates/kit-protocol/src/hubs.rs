@@ -130,3 +130,64 @@ pub fn newer<T: Serialize>(a_time: i64, a: &T, b_time: i64, b: &T) -> bool {
     let b = serde_json::to_string(b).unwrap_or_default();
     a > b
 }
+
+// ---- Pairing and talking to each other ------------------------------------------------------------------------
+
+/// A one-time code a parent makes so another hub can join the family's hubs (`POST /hubs/codes`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubCode {
+    pub code: String,
+    pub expires_at: i64,
+}
+
+/// `POST /hubs/pair`: a hub joining with a code.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairRequest {
+    pub code: String,
+    /// The joining hub ([`crate::Hello::hub_id`]).
+    pub hub_id: String,
+    /// What to call it on the Family screen ("Travel router").
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Paired {
+    /// The hub that was joined.
+    pub hub_id: String,
+    pub family_id: String,
+    /// The secret the joining hub sends with every request from now on (`Authorization: Hub <its hub ID>:<secret>`).
+    /// Sent once; the hub that was joined keeps only its hash.
+    pub secret: String,
+}
+
+/// `POST /hubs/prove`: before sending anything to an unencrypted address, the joined hub is asked to show it knows
+/// the secret, without either side revealing it ([`crate::proof::hub_proof`], keyed by the secret's hash).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubProveRequest {
+    /// The hub asking.
+    pub hub_id: String,
+    pub nonce: String,
+}
+
+/// How many rows changed on the hub that took in a batch (`POST /hubs/changes`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Applied {
+    pub changed: usize,
+}
+
+/// One of the family's other hubs, as this hub knows it (`GET /hubs`, for parents).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerInfo {
+    pub hub_id: String,
+    pub name: String,
+    /// Where this hub calls it. `None`: it calls this hub (a travel hub, behind its own network).
+    pub url: Option<String>,
+    /// When the two last swapped changes. 0: not yet.
+    pub last_synced: i64,
+}

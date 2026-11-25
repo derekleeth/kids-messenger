@@ -298,7 +298,7 @@ fn too_many(wait: Duration) -> Response {
 
 /// Paths anyone may call without a device token.
 fn is_open_path(path: &str) -> bool {
-    matches!(path, "/hello" | "/setup" | "/enroll" | "/prove")
+    matches!(path, "/hello" | "/setup" | "/enroll" | "/prove" | "/hubs/pair" | "/hubs/prove")
 }
 
 /// Paths that may take longer than [`REQUEST_TIMEOUT`]: the live socket and pictures and videos going up or down.
