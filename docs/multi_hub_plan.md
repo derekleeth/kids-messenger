@@ -150,7 +150,7 @@ of flash (mostly the firmware), a USB 3.0 port, and GL.iNet's firmware built on 
 | --- | --- | --- | --- |
 | 1. Groundwork | Hub ID and family ID in `/hello` and `/sync`; the app keeping a sync position per hub; `sentAt` on messages; reaction times (and removed reactions kept as empty); `updated_at` on members; 1:1 chat IDs from the member pair; change numbers on devices and media. Useful by itself, and fixes the sync-position problem of a copied hub. | 3–4 days | Built (PR #7) |
 | 2. Swapping changes | A hub-only "every change since N" endpoint, applying it with the rules above, and a test that runs two hubs side by side: write on both, swap, check they match, swap again, check nothing changes. | ~1 week | Built (PR #8) |
-| 3. Pairing and the sync loop | Hub codes, `kitchat-hub join`, the table of paired hubs, the call-home loop, and passing changes from the other hub to connected devices. | 3–4 days | Built |
+| 3. Pairing and the sync loop | Hub codes, `kitchat-hub join`, the table of paired hubs, the call-home loop, and passing changes from the other hub to connected devices. | 3–4 days | Built (PR #9) |
 | 4. Photos and videos | Copying files in the background with a size limit, and fetching from the other hub when opened. | ~3 days | Next |
 | 5. App | **Family › Hubs** (each hub, last swapped, add a travel hub); hub addresses arriving with the sync. | 2–3 days | To do |
 | 6. Router | The ARM build in the release workflow, and a `docs/travel_hub.md` for the Beryl 7. | 1 day | To do |
