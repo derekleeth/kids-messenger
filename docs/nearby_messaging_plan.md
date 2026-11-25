@@ -1,6 +1,9 @@
 # Plan: messaging without internet (camping and other places with no signal)
 
-Status: **options to weigh.** Nothing here is built yet. The aim of this page is to choose a route.
+Status: **route B chosen and under way.** The travel hub, with several hubs that keep each other in step, was picked to
+start first: phases 1–3 of [multi_hub_plan.md](multi_hub_plan.md) are built (hub IDs, `sentAt`, swapping changes,
+pairing and the call-home loop). The other routes are still options to weigh, and the open questions at the end are
+still open.
 
 Camping, a car with no signal, a big park, a ski hill: the family is fairly close together but no device can reach the
 hub. Today the messages wait in each device's outbox until the hub is back. This page collects the ways KitChat could
@@ -62,6 +65,9 @@ The roster comes from the hub over the connection the app already trusts (HTTPS,
 The hub sets `created_at` when a message reaches it (`hub/src/routes/chats.rs`, `send`). A message written at 2 pm at the
 lake and uploaded at 8 pm sorts at 8 pm. `SendMessage` gets an optional `sentAt`; the hub uses it if it's in the past,
 no more than 7 days old, and matches the ULID's time, and otherwise uses the time it arrives.
+
+**Built** with multi-hub phase 1: `SendMessage.sentAt`, checked by `kit_protocol::sent_at_to_keep`, and the app sends
+the time each message went into its outbox.
 
 ### 3. One outbox, several ways out
 
@@ -248,7 +254,7 @@ Ranked by value for us:
 
 1. **Roster and keys** (needed by A, C, D). Store each device's key and radio node ID, send the roster with `/sync`, take
    it out when a device is removed. Small changes to `devices`, `routes/members.rs` and `routes/sync.rs`.
-2. **Correct times for late messages** (needed by all but B). Accept `sentAt`.
+2. **Correct times for late messages** (needed by all but B). Accept `sentAt`. **Built.**
 3. **LoRa gateway** (with C). A Heltec on the hub's Wi-Fi (TCP 4403) or USB. Radio messages go into the hub as their
    senders (by the roster's node IDs), so every phone with internet sees "on my way back 🐾" from a kid out of signal.
    Text and stickers from the app go out by radio to members reachable only that way. Works at home and, with the hub
@@ -258,7 +264,7 @@ Ranked by value for us:
    like members.
 5. **One history for parents** (comes free). Every message still reaches the hub from its sender's outbox.
 6. **Several hubs in step** (B): the travel hub on the Beryl 7 swaps changes with the home hub whenever it can reach
-   it. See [multi_hub_plan.md](multi_hub_plan.md).
+   it. Pairing and the call-home loop are built; see [multi_hub_plan.md](multi_hub_plan.md).
 7. **Carrying other people's messages to the hub** (later, optional). If a kid's tablet stays offline for days, the
    first family device back online could upload what it received on the sender's behalf. The hub would need the
    sender's signature with their roster key, which A can provide (the key is ours); D would need a signing call the
@@ -312,13 +318,14 @@ firmware allows it.
 
 ## Suggested route
 
-1. **Roster and `sentAt`** (needed by every route but B; about 2–3 days).
+1. **Roster** (needed by every route but B; about 2 days). `sentAt` is already built.
 2. **A. Same Wi-Fi with iroh** for trips with the travel router: Android and desktop, small photos, no licence change.
 3. **C. Meshtastic radios and the hub gateway** for distance, once we've decided on the GPL.
 4. **D. Phone-to-phone Bluetooth** probably isn't needed: A covers "close together" and C covers "far apart" better.
    Look at it again only if there are often trips with no router and no radios.
 5. **B. Travel hub** with several hubs in step ([multi_hub_plan.md](multi_hub_plan.md)). Chosen to start first: its
-   phase 1 (hub IDs, a sync position per hub, `sentAt`) is groundwork the other routes share.
+   phase 1 (hub IDs, a sync position per hub, `sentAt`) is groundwork the other routes share. Phases 1–3 are built;
+   photos between hubs, the app's Hubs screen and the router build are next.
 
 ## Open questions
 

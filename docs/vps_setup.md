@@ -370,8 +370,8 @@ server {
         proxy_buffering off;
     }
 
-    # Joining and first setup: few tries per address.
-    location ~ ^/(enroll|setup)$ {
+    # Joining, first setup and pairing a travel hub: few tries per address.
+    location ~ ^/(enroll|setup|hubs/pair)$ {
         limit_req zone=kitchat_join burst=5 nodelay;
         proxy_pass http://127.0.0.1:8787;
     }
@@ -419,8 +419,8 @@ sudo apt install -y fail2ban
 
 sudo tee /etc/fail2ban/filter.d/kitchat.conf > /dev/null <<'EOF'
 [Definition]
-# Wrong setup or join codes (400/401) and lockouts (429) on /setup and /enroll.
-failregex = ^<HOST> \S+ \S+ \[[^\]]+\] "POST /(?:setup|enroll)(?:\?\S*)? HTTP/[\d.]+" (?:400|401|429) 
+# Wrong setup, join or hub codes (400/401) and lockouts (429) on /setup, /enroll and /hubs/pair.
+failregex = ^<HOST> \S+ \S+ \[[^\]]+\] "POST /(?:setup|enroll|hubs/pair)(?:\?\S*)? HTTP/[\d.]+" (?:400|401|429) 
 ignoreregex =
 EOF
 

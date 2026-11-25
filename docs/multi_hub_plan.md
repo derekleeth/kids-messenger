@@ -102,6 +102,10 @@ the hub's clock: the router has no battery-backed clock and can be wrong after a
   its data folder should be guarded like home's (it has the whole family anyway).
 - **Space.** The router doesn't need every old video: it copies every record but files only up to a limit (say the
   last 30 days or 20 GB), and fetches older ones from home when opened, if there's internet.
+- **Only the travel hub calls.** Home lists the travel hub (`GET /hubs`) but never calls it, and keeps no positions
+  for it; a home hub on a VPS or behind Tailscale works the same.
+- **Changes go back once.** Rows the travel hub takes in from home take its own change numbers, so it sends them back;
+  home finds nothing new in them and changes nothing. A little extra traffic, no harm; it could be skipped later.
 - **Two separate families can't be joined** into one: their family IDs differ, so they refuse to pair.
 
 ## Running the hub on the Beryl 7
@@ -130,21 +134,25 @@ of flash (mostly the firmware), a USB 3.0 port, and GL.iNet's firmware built on 
    ./kitchat-hub --data ./hub-data --port 8787
    ```
 
-4. **Start with the router:** a procd script `/etc/init.d/kitchat-hub` that waits for the USB drive and restarts the
+4. **Join the family** once, before starting it for good: `kitchat-hub pair-code` on the home hub, then on the router
+   `./kitchat-hub --data ./hub-data join https://kitchat.example.com CODE --name Beryl` (see
+   [Hubs know each other](#hubs-know-each-other)). The running hub then keeps in step with home whenever the router
+   has internet.
+5. **Start with the router:** a procd script `/etc/init.d/kitchat-hub` that waits for the USB drive and restarts the
    hub if it stops; `/etc/init.d/kitchat-hub enable`; and the script listed in `/etc/sysupgrade.conf` so firmware
    updates keep it.
-5. **Devices** reach it at `192.168.8.1:8787`. The router's LAN lets devices reach it by default, and its addresses are
+6. **Devices** reach it at `192.168.8.1:8787`. The router's LAN lets devices reach it by default, and its addresses are
    private, so the hub's "prove you're ours" check works as at home.
 
 ## Phases
 
-| Phase | What | Size |
-| --- | --- | --- |
-| 1. Groundwork | Hub ID and family ID in `/hello` and `/sync`; the app keeping a sync position per hub; `sentAt` on messages; reaction times (and removed reactions kept as empty); `updated_at` on members; 1:1 chat IDs from the member pair; change numbers on devices and media. Useful by itself, and fixes the sync-position problem of a copied hub. | 3–4 days |
-| 2. Swapping changes | A hub-only "every change since N" endpoint, applying it with the rules above, and a test that runs two hubs side by side: write on both, swap, check they match, swap again, check nothing changes. | ~1 week |
-| 3. Pairing and the sync loop | Hub codes, `kitchat-hub join`, the table of paired hubs, the call-home loop, and passing changes from the other hub to connected devices. | 3–4 days |
-| 4. Photos and videos | Copying files in the background with a size limit, and fetching from the other hub when opened. | ~3 days |
-| 5. App | **Family › Hubs** (each hub, last swapped, add a travel hub); hub addresses arriving with the sync. | 2–3 days |
-| 6. Router | The ARM build in the release workflow, and a `docs/travel_hub.md` for the Beryl 7. | 1 day |
+| Phase | What | Size | Status |
+| --- | --- | --- | --- |
+| 1. Groundwork | Hub ID and family ID in `/hello` and `/sync`; the app keeping a sync position per hub; `sentAt` on messages; reaction times (and removed reactions kept as empty); `updated_at` on members; 1:1 chat IDs from the member pair; change numbers on devices and media. Useful by itself, and fixes the sync-position problem of a copied hub. | 3–4 days | Built (PR #7) |
+| 2. Swapping changes | A hub-only "every change since N" endpoint, applying it with the rules above, and a test that runs two hubs side by side: write on both, swap, check they match, swap again, check nothing changes. | ~1 week | Built (PR #8) |
+| 3. Pairing and the sync loop | Hub codes, `kitchat-hub join`, the table of paired hubs, the call-home loop, and passing changes from the other hub to connected devices. | 3–4 days | Built |
+| 4. Photos and videos | Copying files in the background with a size limit, and fetching from the other hub when opened. | ~3 days | Next |
+| 5. App | **Family › Hubs** (each hub, last swapped, add a travel hub); hub addresses arriving with the sync. | 2–3 days | To do |
+| 6. Router | The ARM build in the release workflow, and a `docs/travel_hub.md` for the Beryl 7. | 1 day | To do |
 
 After phases 1–3, text, stickers, reactions and lists work across hubs; photos come with phase 4.

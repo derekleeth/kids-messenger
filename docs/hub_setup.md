@@ -41,7 +41,7 @@ Options:
 
 A flag wins over its environment variable.
 
-The hub protects itself on its own: joining and setting up (`/hello`, `/setup`, `/enroll`) are limited to 10 a minute
+The hub protects itself on its own: joining and setting up (`/hello`, `/setup`, `/enroll`, and pairing another hub, `/hubs/pair`) are limited to 10 a minute
 per address; an address that sends 20 wrong device tokens in 10 minutes is refused for 15 minutes; each device may make
 20 requests a second, each address 40; an address gets 5 wrong codes in 10 minutes (and the whole hub 10); each device
 may keep 3 live connections open, 64 in all. Requests that run over 30 seconds are stopped (except live connections
@@ -148,6 +148,23 @@ outside the home network).
 
 Every request to the hub needs a device token that only enrolled devices have, so a public address doesn't let
 anyone in. Join codes are locked after 10 wrong guesses.
+
+## 6. A second hub for trips (optional)
+
+A travel router or a laptop can run a second hub that keeps a full copy of the family, so everyone can keep chatting
+over its Wi-Fi where there's no internet; it swaps changes with this hub whenever it can reach it. Pair it once:
+
+```bash
+# On this (the home) hub: a code that works once, for 10 minutes.
+kitchat-hub --data <this hub's data folder> pair-code
+
+# On the travel hub, before starting it, with its own empty data folder:
+kitchat-hub --data ./hub-data join <this hub's address> CODE --name "Beryl"
+```
+
+The address is the one the travel hub can reach: `https://` for a VPS or tunnel, or `192.168.1.20:8787` while it's on
+the home network. Then start the travel hub as usual; devices add it as one more hub address. `kitchat-hub sync` swaps
+changes once by hand. Photos don't copy between hubs yet. More in [multi_hub_plan.md](multi_hub_plan.md).
 
 ## Trouble?
 
